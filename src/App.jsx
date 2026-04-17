@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
 import { AuthProvider, useAuth, INSEGNE_DISPONIBILI } from './AuthContext';
+// statoVolantini viene ora passato come prop anche alla selezione supermercati
 import {
   Search,
   ListTodo,
@@ -250,6 +251,98 @@ const ProductCard = ({ offerta, storico = null, archivio = [], index = 0 }) => {
             <Clock size={12} strokeWidth={1.5} /> Scade domani
           </span>
         )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Schermata Selezione Supermercati (onboarding step 2) ────────────────────
+// Mostrata dopo il login se onboarding_supermercati === false.
+// L'utente vede tutte le insegne disponibili con le loro zone e seleziona le sue.
+
+const SchermataSelezioneSupermarket = ({ statoVolantini, onConferma }) => {
+  const [selezionate, setSelezionate] = useState([]);
+
+  const toggleSel = (insegna) => {
+    setSelezionate(prev =>
+      prev.includes(insegna) ? prev.filter(i => i !== insegna) : [...prev, insegna]
+    );
+  };
+
+  // Raggruppa stato_volantini per insegna con le loro sedi
+  const insegneDisponibili = statoVolantini.reduce((acc, stato) => {
+    const key = stato.insegna;
+    if (!acc[key]) acc[key] = { insegna: key, tipo: stato.tipo || 'locale', sedi: [] };
+    const sedi = stato.sedi || [];
+    sedi.forEach(s => { if (s !== 'nazionale' && !acc[key].sedi.includes(s)) acc[key].sedi.push(s); });
+    return acc;
+  }, {});
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto" style={{ background: T.bg }}>
+      <div className="px-5 pt-10 pb-6" style={{ background: T.primary }}>
+        <IconaLenticchia size={32} className="text-white mb-4" />
+        <h1 style={{ fontFamily: "'Lora', serif", fontSize: '24px', fontWeight: 500, color: '#fff', marginBottom: '8px' }}>
+          Quali supermercati frequenti?
+        </h1>
+        <p className="text-sm" style={{ color: 'rgba(255,255,255,0.8)' }}>
+          Il Verdetto Spesa confronterà solo quelli che selezioni.
+          Puoi cambiare in qualsiasi momento dal Profilo.
+        </p>
+      </div>
+
+      <div className="px-4 py-5 space-y-3 flex-1">
+        {Object.values(insegneDisponibili).map(({ insegna, tipo, sedi }) => {
+          const sel = selezionate.includes(insegna);
+          return (
+            <button
+              key={insegna}
+              onClick={() => toggleSel(insegna)}
+              className="w-full flex items-center gap-4 p-4 rounded-[20px] text-left transition-all active:scale-[0.99]"
+              style={{
+                background: sel ? '#EEF2E4' : T.surface,
+                border: `2px solid ${sel ? T.primary : T.border}`,
+                boxShadow: sel ? `0 4px 16px rgba(100,113,68,0.15)` : '0 2px 8px rgba(44,48,38,0.04)',
+              }}
+            >
+              {/* Checkbox visuale */}
+              <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"
+                style={{ background: sel ? T.primary : T.border }}>
+                {sel && <span style={{ color: '#fff', fontSize: '14px', lineHeight: 1 }}>✓</span>}
+              </div>
+              <div className="flex-1">
+                <div className="font-medium" style={{ color: T.textPrimary, fontSize: '16px' }}>
+                  {insegna}
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: T.textSec }}>
+                  {tipo === 'nazionale'
+                    ? 'Valido in tutti i punti vendita Italia'
+                    : sedi.length > 0
+                      ? `Zone: ${sedi.join(', ')}`
+                      : 'Punti vendita Roma'
+                  }
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="px-4 pb-8 pt-2">
+        <p className="text-xs text-center mb-4" style={{ color: T.textSec }}>
+          {selezionate.length === 0
+            ? 'Seleziona almeno un supermercato per continuare'
+            : `${selezionate.length} supermercati selezionati`
+          }
+        </p>
+        <button
+          onClick={() => onConferma(selezionate)}
+          disabled={selezionate.length === 0}
+          className="w-full py-4 rounded-[20px] font-medium text-white transition-all active:scale-[0.98] disabled:opacity-40"
+          style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: '0 8px 20px rgba(44,48,38,0.2)' }}
+        >
+          Continua
+        </button>
       </div>
     </div>
   );
@@ -950,12 +1043,13 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
 
       if (!items.length) { setRisultato(null); setIsAnalyzing(false); return; }
 
-      // Filtra per insegne attive se l'utente ha preferenze configurate
-      const insegneAttive = preferenze?.insegne_attive?.length
-        ? preferenze.insegne_attive
-        : [...new Set(offerte.map(o => o.insegna))];
-
-      const insegne = [...new Set(offerte.map(o => o.insegna))].filter(i => insegneAttive.includes(i));
+      // Filtra per insegne attive nelle preferenze utente
+      // Se null (primo accesso prima dell'onboarding) → usa tutte le insegne
+      const insegneAttivePref = preferenze?.insegne_attive;
+      const tutteLeInsegne = [...new Set(offerte.map(o => o.insegna))];
+      const insegne = insegneAttivePref
+        ? tutteLeInsegne.filter(i => insegneAttivePref.includes(i))
+        : tutteLeInsegne;
       const offerteOtt = offerte.map(o => ({ ...o, sN: (o.nome||'').toLowerCase(), sM: (o.marca||'').toLowerCase(), sC: (o.categoria||'').toLowerCase() }));
       const storeResults = insegne.map(insegna => {
         const storeOffers = offerteOtt.filter(o => o.insegna === insegna);
@@ -1269,35 +1363,88 @@ function AppInterna() {
   const [loading, setLoading] = useState(true);
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [archivio, setArchivio] = useState([]);
-  const { utente, profilo, loading: authLoading, completaOnboarding } = useAuth();
+  const { utente, profilo, preferenze, loading: authLoading, completaOnboarding, completaOnboardingSupermercati } = useAuth();
+
+  // ─── Cache helpers ────────────────────────────────────────────────────────
+  // TTL: offerte e stato validi per 6 ore — cambiano solo il giovedì
+  // L'archivio NON viene caricato al boot: costa centinaia di letture
+  // per una feature visiva (sparkline) non critica. Verrà caricato lazy.
+
+  const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 ore
+
+  const leggiCache = (chiave) => {
+    try {
+      const raw = localStorage.getItem(chiave);
+      if (!raw) return null;
+      const { ts, data } = JSON.parse(raw);
+      if (Date.now() - ts > CACHE_TTL_MS) { localStorage.removeItem(chiave); return null; }
+      return data;
+    } catch { return null; }
+  };
+
+  const scriviCache = (chiave, data) => {
+    try { localStorage.setItem(chiave, JSON.stringify({ ts: Date.now(), data })); } catch {}
+  };
+
+  const invalidaCache = () => {
+    // Chiamata dallo scraper via Firestore trigger (futuro) o manualmente
+    localStorage.removeItem('lenticchia_cache_offerte');
+    localStorage.removeItem('lenticchia_cache_stato');
+  };
 
   useEffect(() => {
     const fetchData = async () => {
+      const oggi = new Date().toISOString().split('T')[0];
+
+      // ── 1. Prova cache locale prima di toccare Firestore ──────────────────
+      const cacheOfferte = leggiCache('lenticchia_cache_offerte');
+      const cachStato    = leggiCache('lenticchia_cache_stato');
+
+      if (cacheOfferte && cachStato) {
+        // Cache valida — zero letture Firestore
+        const offerteValide = cacheOfferte.filter(o => !o.valido_fino || o.valido_fino >= oggi);
+        if (offerteValide.length > 0) {
+          setOfferte(offerteValide);
+          setStatoVolantini(cachStato);
+          setLoading(false);
+          return;
+        }
+        // Cache scaduta per data offerte (non per TTL) — invalida e ricarica
+        invalidaCache();
+      }
+
+      // ── 2. Cache mancante o scaduta — legge da Firestore ─────────────────
       try {
-        const offerteCol = collection(db, 'offerte_attive');
-        const offerteSnapshot = await getDocs(offerteCol);
-        const oggi = new Date().toISOString().split('T')[0];
-        const offerteList = offerteSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(o => !o.valido_fino || o.valido_fino >= oggi);
-        const statoCol = collection(db, 'stato_volantini');
-        const statoSnapshot = await getDocs(statoCol);
+        const [offerteSnapshot, statoSnapshot] = await Promise.all([
+          getDocs(collection(db, 'offerte_attive')),
+          getDocs(collection(db, 'stato_volantini')),
+        ]);
+
+        const offerteList = offerteSnapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() }))
+          .filter(o => !o.valido_fino || o.valido_fino >= oggi);
+
+        // stato_volantini include ora: insegna, tipo, sedi, valido_dal/fino, n_prodotti
         const statoList = statoSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        let archivioList = [];
-        try {
-          const archivioCol = collection(db, 'archivio_offerte');
-          const archivioSnapshot = await getDocs(archivioCol);
-          const archivioPromises = archivioSnapshot.docs.slice(0, 20).map(async (archDoc) => {
-            const prodCol = collection(db, 'archivio_offerte', archDoc.id, 'prodotti');
-            const prodSnap = await getDocs(prodCol);
-            return prodSnap.docs.map(d => ({ ...d.data(), _archivio_id: archDoc.id }));
-          });
-          archivioList = (await Promise.all(archivioPromises)).flat();
-        } catch {}
+
         if (offerteList.length === 0) {
           setOfferte(MOCK_OFFERTE); setStatoVolantini(MOCK_STATO); setIsDemoMode(true);
         } else {
-          setOfferte(offerteList); setStatoVolantini(statoList); setArchivio(archivioList);
+          setOfferte(offerteList);
+          setStatoVolantini(statoList);
+          // Salva entrambi in cache per le prossime 6 ore
+          // stato_volantini è piccolo (9 doc) ma evita letture inutili ad ogni apertura
+          scriviCache('lenticchia_cache_offerte', offerteList);
+          scriviCache('lenticchia_cache_stato', statoList);
         }
+
+        // ── 3. Archivio NON caricato al boot ─────────────────────────────
+        // setArchivio([]) rimane vuoto — le sparkline non appaiono finché
+        // l'utente non riapre l'app dopo il giovedì (quando lo caricheremo lazy)
+        // TODO Sprint 3: carica archivio lazy on-demand nella ProductCard
+
       } catch {
+        // Firestore non raggiungibile — usa mock
         setOfferte(MOCK_OFFERTE); setStatoVolantini(MOCK_STATO); setIsDemoMode(true);
       } finally {
         setLoading(false);
@@ -1335,6 +1482,18 @@ function AppInterna() {
     return (
       <div className="w-full max-w-md mx-auto min-h-screen shadow-2xl relative" style={{ background: T.bg }}>
         <SchermataOnboarding onConferma={completaOnboarding} />
+      </div>
+    );
+  }
+
+  // Step 2 onboarding: selezione supermercati (dopo privacy, prima dell'app)
+  if (utente && preferenze && preferenze.onboarding_supermercati === false) {
+    return (
+      <div className="w-full max-w-md mx-auto min-h-screen shadow-2xl relative" style={{ background: T.bg }}>
+        <SchermataSelezioneSupermarket
+          statoVolantini={statoVolantini}
+          onConferma={completaOnboardingSupermercati}
+        />
       </div>
     );
   }

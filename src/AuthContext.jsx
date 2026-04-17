@@ -61,10 +61,11 @@ const DEFAULT_LISTA_SPESA = {
 };
 
 const DEFAULT_PREFERENZE = {
-  // Tutte le insegne attive per default — l'utente disattiva quelle che non vuole
-  insegne_attive: [...INSEGNE_DISPONIBILI],
-  // Tessere: { "Lidl": { attiva: true, numero: "1234567" }, "CTS": { attiva: true, numero: "" } }
+  zona_selezionata: null,        // null = onboarding selezione non ancora completato
+  // insegne_attive: popolato dopo selezione zona — null = mostra tutte (prima del setup)
+  insegne_attive: null,
   tessere: {},
+  onboarding_supermercati: false, // true = l'utente ha già fatto la selezione iniziale
   ultima_modifica: null,
 };
 
@@ -127,8 +128,14 @@ export function AuthProvider({ children }) {
 
       // Profilo
       if (profiloSnap.exists()) {
-        setProfilo(profiloSnap.data());
-        await setDoc(refs.profilo, { ultimo_accesso: serverTimestamp() }, { merge: true });
+        const dati = profiloSnap.data();
+        setProfilo(dati);
+        // Scrive ultimo_accesso max una volta al giorno — evita scritture inutili
+        const oggi = new Date().toISOString().split('T')[0];
+        const ultimoAccesso = dati.ultimo_accesso?.toDate?.()?.toISOString?.()?.split('T')[0];
+        if (ultimoAccesso !== oggi) {
+          await setDoc(refs.profilo, { ultimo_accesso: serverTimestamp() }, { merge: true });
+        }
       } else {
         const nuovoProfilo = creaProfilo(firebaseUser);
         await setDoc(refs.profilo, nuovoProfilo);
@@ -210,11 +217,22 @@ export function AuthProvider({ children }) {
   };
 
   const toggleInsegna = async (insegna) => {
-    const attive = preferenze.insegne_attive || [...INSEGNE_DISPONIBILI];
+    // Se insegne_attive è null (primo setup), partiamo da lista vuota —
+    // l'utente costruisce la sua selezione da zero
+    const attive = preferenze.insegne_attive || [];
     const nuoveAttive = attive.includes(insegna)
       ? attive.filter(i => i !== insegna)
       : [...attive, insegna];
     await aggiornaPreferenze({ ...preferenze, insegne_attive: nuoveAttive });
+  };
+
+  // Completa onboarding supermercati — salva la selezione iniziale
+  const completaOnboardingSupermercati = async (insegneSelezionate) => {
+    await aggiornaPreferenze({
+      ...preferenze,
+      insegne_attive: insegneSelezionate,
+      onboarding_supermercati: true,
+    });
   };
 
   const aggiornaTessera = async (insegna, attiva, numero = '') => {
@@ -318,6 +336,9 @@ export function AuthProvider({ children }) {
     prodottiPreferiti,
     aggiungiProdottoPreferito,
     rimuoviProdottoPreferito,
+
+    // Onboarding supermercati
+    completaOnboardingSupermercati,
   };
 
   return (
