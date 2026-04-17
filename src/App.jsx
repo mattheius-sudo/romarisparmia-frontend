@@ -858,66 +858,14 @@ const TabProfilo = () => {
 
 const TabScontrino = () => {
   const { utente } = useAuth();
-  const [stato, setStato] = useState('idle'); // idle | caricando | successo | errore
+  const [stato, setStato] = useState('idle'); // idle | anteprima | caricando | successo | errore
   const [messaggio, setMessaggio] = useState('');
   const [puntiAnimati, setPuntiAnimati] = useState(false);
+  const [foto, setFoto] = useState([]); // array di { file, preview, base64 }
   const inputRef = React.useRef(null);
+  const MAX_FOTO = 4; // massimo 4 foto per scontrino
 
-  const gestisciFoto = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    // Valida che sia un'immagine
-    if (!file.type.startsWith('image/')) {
-      setStato('errore');
-      setMessaggio("Seleziona un'immagine dello scontrino.");
-      return;
-    }
-
-    // Valida dimensione max 4MB
-    if (file.size > 4 * 1024 * 1024) {
-      setStato('errore');
-      setMessaggio('Immagine troppo grande. Scatta una foto più ravvicinata.');
-      return;
-    }
-
-    setStato('caricando');
-    setMessaggio('');
-
-    try {
-      // Converti in base64 con compressione
-      const base64 = await comprimiImmagine(file);
-
-      // Salva in coda_scontrini su Firestore
-      const { addDoc, collection, serverTimestamp } = await import('firebase/firestore');
-      const { db } = await import('./firebase');
-
-      await addDoc(collection(db, 'coda_scontrini'), {
-        uid: utente.uid,
-        immagine_b64: base64,
-        stato: 'in_attesa',
-        data_caricamento: serverTimestamp(),
-        note_utente: '',
-      });
-
-      setStato('successo');
-      // Animazione punti dopo 600ms
-      setTimeout(() => setPuntiAnimati(true), 600);
-      // Reset dopo 5 secondi
-      setTimeout(() => {
-        setStato('idle');
-        setPuntiAnimati(false);
-        if (inputRef.current) inputRef.current.value = '';
-      }, 5000);
-
-    } catch (err) {
-      console.error('Errore caricamento scontrino:', err);
-      setStato('errore');
-      setMessaggio('Errore nel caricamento. Riprova.');
-    }
-  };
-
-  // Comprime l'immagine a max 800px e qualità 70%
+  // Comprime immagine a max 1200px, qualità 70%
   const comprimiImmagine = (file) => new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
@@ -934,9 +882,89 @@ const TabScontrino = () => {
       URL.revokeObjectURL(url);
       resolve(canvas.toDataURL('image/jpeg', 0.70));
     };
-    img.onerror = reject;
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Errore lettura immagine')); };
     img.src = url;
   });
+
+  const aggiungiFoto = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+
+    // Controlla limite
+    if (foto.length + files.length > MAX_FOTO) {
+      setMessaggio(`Massimo ${MAX_FOTO} foto per scontrino.`);
+      setStato('errore');
+      return;
+    }
+
+    // Valida ogni file
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) {
+        setMessaggio('Seleziona solo immagini.');
+        setStato('errore');
+        return;
+      }
+      if (file.size > 8 * 1024 * 1024) {
+        setMessaggio('Una foto è troppo grande. Scatta da più vicino.');
+        setStato('errore');
+        return;
+      }
+    }
+
+    // Processa le nuove foto
+    const nuoveFoto = await Promise.all(files.map(async (file) => {
+      const base64 = await comprimiImmagine(file);
+      return { file, preview: base64, base64 };
+    }));
+
+    setFoto(prev => [...prev, ...nuoveFoto]);
+    setStato('anteprima');
+    setMessaggio('');
+    // Reset input per permettere di selezionare la stessa foto di nuovo
+    if (inputRef.current) inputRef.current.value = '';
+  };
+
+  const rimuoviFoto = (index) => {
+    setFoto(prev => {
+      const nuove = prev.filter((_, i) => i !== index);
+      if (nuove.length === 0) setStato('idle');
+      return nuove;
+    });
+  };
+
+  const inviaScontrino = async () => {
+    if (!foto.length) return;
+    setStato('caricando');
+
+    try {
+      const { addDoc, collection, serverTimestamp } = await import('firebase/firestore');
+      const { db } = await import('./firebase');
+
+      // Salva in coda con array di immagini
+      // Il processore notturno manderà tutte le foto nello stesso messaggio Claude
+      await addDoc(collection(db, 'coda_scontrini'), {
+        uid: utente.uid,
+        immagini_b64: foto.map(f => f.base64),  // array — una o più foto
+        n_foto: foto.length,
+        stato: 'in_attesa',
+        data_caricamento: serverTimestamp(),
+        note_utente: '',
+      });
+
+      setFoto([]);
+      setStato('successo');
+      setTimeout(() => setPuntiAnimati(true), 600);
+      setTimeout(() => {
+        setStato('idle');
+        setPuntiAnimati(false);
+      }, 5000);
+
+    } catch (err) {
+      console.error('Errore invio scontrino:', err);
+      setStato('errore');
+      setMessaggio('Errore nel caricamento. Riprova.');
+    }
+  };
 
   return (
     <div className="flex flex-col h-full overflow-y-auto pb-28" style={{ background: T.bg }}>
@@ -946,18 +974,31 @@ const TabScontrino = () => {
           Invia Scontrino
         </h2>
         <p className="text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>
-          Fotografa lo scontrino — elaboriamo stanotte.
+          {foto.length === 0
+            ? 'Fotografa lo scontrino — elaboriamo stanotte.'
+            : `${foto.length} foto — scontrino lungo? Aggiungine altre.`
+          }
         </p>
       </div>
 
       <div className="px-4 -mt-4 relative z-10">
 
-        {/* Stato: idle — bottone principale */}
+        {/* Input file nascosto — riutilizzato da tutti i bottoni */}
+        <input
+          id="scontrino-input"
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={aggiungiFoto}
+        />
+
+        {/* Stato: idle — nessuna foto ancora */}
         {stato === 'idle' && (
           <div className="rounded-[24px] p-6 mb-4 animate-fade-in-up"
             style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
 
-            {/* Area click per fotocamera */}
             <label htmlFor="scontrino-input" className="block cursor-pointer">
               <div
                 className="rounded-[20px] flex flex-col items-center justify-center gap-4 py-12 mb-5 transition-all active:scale-[0.98]"
@@ -978,18 +1019,6 @@ const TabScontrino = () => {
               </div>
             </label>
 
-            {/* Input nascosto — accetta foto dalla fotocamera */}
-            <input
-              id="scontrino-input"
-              ref={inputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              className="hidden"
-              onChange={gestisciFoto}
-            />
-
-            {/* Info punti */}
             <div className="rounded-2xl p-4" style={{ background: '#EEF2E4', border: `1px solid #C8D9A0` }}>
               <p className="text-sm font-medium mb-2" style={{ color: T.primary }}>
                 Guadagni punti per ogni scontrino:
@@ -1007,6 +1036,74 @@ const TabScontrino = () => {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Stato: anteprima — mostra le foto aggiunte */}
+        {stato === 'anteprima' && (
+          <div className="rounded-[24px] p-5 mb-4 animate-fade-in-up"
+            style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
+
+            <p className="text-xs uppercase tracking-wider font-medium mb-3" style={{ color: T.textSec }}>
+              {foto.length} {foto.length === 1 ? 'foto' : 'foto'} — scontrino lungo? Aggiungine altre
+            </p>
+
+            {/* Griglia anteprime */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              {foto.map((f, i) => (
+                <div key={i} className="relative rounded-2xl overflow-hidden"
+                  style={{ aspectRatio: '3/4', background: T.border }}>
+                  <img src={f.preview} alt={`Foto ${i+1}`}
+                    className="w-full h-full object-cover" />
+                  {/* Numero foto */}
+                  <div className="absolute top-2 left-2 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white"
+                    style={{ background: T.primary }}>
+                    {i + 1}
+                  </div>
+                  {/* Bottone rimuovi */}
+                  <button
+                    onClick={() => rimuoviFoto(i)}
+                    className="absolute top-2 right-2 w-7 h-7 rounded-full flex items-center justify-center"
+                    style={{ background: 'rgba(0,0,0,0.5)' }}
+                  >
+                    <X size={14} className="text-white" strokeWidth={2} />
+                  </button>
+                </div>
+              ))}
+
+              {/* Slot "aggiungi altra foto" — visibile se sotto il limite */}
+              {foto.length < MAX_FOTO && (
+                <label htmlFor="scontrino-input" className="cursor-pointer">
+                  <div
+                    className="rounded-2xl flex flex-col items-center justify-center gap-2 transition-all active:scale-[0.97]"
+                    style={{ aspectRatio: '3/4', background: T.bg, border: `2px dashed ${T.border}` }}
+                  >
+                    <div className="w-10 h-10 rounded-full flex items-center justify-center"
+                      style={{ background: '#EEF2E4' }}>
+                      <Camera size={20} strokeWidth={1.5} style={{ color: T.primary }} />
+                    </div>
+                    <p className="text-xs text-center px-2" style={{ color: T.textSec }}>
+                      Aggiungi foto {foto.length + 1}/{MAX_FOTO}
+                    </p>
+                  </div>
+                </label>
+              )}
+            </div>
+
+            {/* Bottone invio */}
+            <button
+              onClick={inviaScontrino}
+              className="w-full py-4 rounded-[20px] font-medium text-white transition-all active:scale-[0.98]"
+              style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: '0 8px 20px rgba(44,48,38,0.2)' }}
+            >
+              Invia {foto.length === 1 ? 'lo scontrino' : `le ${foto.length} foto`}
+            </button>
+
+            {foto.length > 1 && (
+              <p className="text-xs text-center mt-3" style={{ color: T.textSec }}>
+                Le {foto.length} foto verranno lette insieme come un unico scontrino
+              </p>
+            )}
           </div>
         )}
 
@@ -1037,8 +1134,6 @@ const TabScontrino = () => {
                 Elaboriamo stanotte e ti assegniamo i punti.
               </p>
             </div>
-
-            {/* Animazione punti */}
             {puntiAnimati && (
               <div className="rounded-2xl px-6 py-3 animate-spring"
                 style={{ background: 'rgba(255,255,255,0.2)' }}>
@@ -1062,7 +1157,7 @@ const TabScontrino = () => {
             </p>
             <p className="text-sm mb-4" style={{ color: T.textSec }}>{messaggio}</p>
             <button
-              onClick={() => { setStato('idle'); setMessaggio(''); }}
+              onClick={() => { setStato('idle'); setMessaggio(''); setFoto([]); }}
               className="w-full py-3 rounded-2xl font-medium text-white"
               style={{ background: T.textPrimary }}
             >
@@ -1071,11 +1166,11 @@ const TabScontrino = () => {
           </div>
         )}
 
-        {/* Info privacy — sempre visibile */}
-        {stato === 'idle' && (
+        {/* Info privacy */}
+        {(stato === 'idle' || stato === 'anteprima') && (
           <div className="rounded-2xl p-4" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
             <p className="text-sm leading-relaxed text-blue-800">
-              <strong>Privacy:</strong> estraiamo solo prodotti e prezzi. Codici fiscali, numeri carta e nomi vengono ignorati automaticamente. L'immagine viene cancellata dopo l'elaborazione.
+              <strong>Privacy:</strong> estraiamo solo prodotti e prezzi. Codici fiscali, numeri carta e nomi vengono ignorati. Le immagini vengono cancellate dopo elaborazione.
             </p>
           </div>
         )}
