@@ -13,6 +13,10 @@ import {
   ShoppingCart,
   MapPin,
   TrendingDown,
+  TrendingUp,
+  BarChart2,
+  SlidersHorizontal,
+  History,
   Store,
   ArrowLeft
 } from 'lucide-react';
@@ -55,6 +59,7 @@ const COLORI_INSEGNE = {
   'MD Discount': 'bg-[#6A1B9A] text-white',
   'MD': 'bg-[#6A1B9A] text-white',
   'Sacoph': 'bg-[#00695C] text-white',
+  'Elite': 'bg-[#B8860B] text-white',
   'default': 'bg-gray-600 text-white'
 };
 
@@ -123,7 +128,7 @@ const formattaPrezzo = (prezzo) => {
 // 4. COMPONENTI UI
 // ==========================================
 
-const ProductCard = ({ offerta }) => {
+const ProductCard = ({ offerta, storico = null, archivio = [] }) => {
   const oggi = getOggi();
   const domani = getDomani();
   const isScadenzaOggi = offerta.valido_fino === oggi;
@@ -141,10 +146,51 @@ const ProductCard = ({ offerta }) => {
         </div>
         <div className="text-right">
           <div className="text-xl font-bold text-gray-900">{formattaPrezzo(offerta.prezzo)}</div>
-          <div className="text-xs text-gray-500">{formattaPrezzo(offerta.prezzo_kg)}/kg</div>
+          {offerta.prezzo_kg && <div className="text-xs text-gray-500">{formattaPrezzo(offerta.prezzo_kg)}/kg</div>}
+          {storico && storico.prezzo !== offerta.prezzo && (
+            <div className={`text-xs font-bold mt-0.5 ${storico.prezzo > offerta.prezzo ? 'text-green-600' : 'text-red-500'}`}>
+              {storico.prezzo > offerta.prezzo ? '▼ ' : '▲ '}
+              {storico.prezzo > offerta.prezzo ? 'sceso' : 'salito'} da {formattaPrezzo(storico.prezzo)}
+            </div>
+          )}
         </div>
       </div>
       
+      {/* Grafico storico prezzi — mini sparkline SVG */}
+      {archivio && (() => {
+        const storici = archivio
+          .filter(a => a.insegna === offerta.insegna && a.nome && offerta.nome &&
+            a.nome.toLowerCase() === offerta.nome.toLowerCase() && a.prezzo)
+          .sort((a, b) => (a.valido_fino || '').localeCompare(b.valido_fino || ''))
+          .slice(-6);
+        if (storici.length < 2) return null;
+        const prezzi = [...storici.map(s => s.prezzo), offerta.prezzo];
+        const min = Math.min(...prezzi), max = Math.max(...prezzi);
+        const range = max - min || 1;
+        const W = 80, H = 24;
+        const pts = prezzi.map((p, i) => {
+          const x = (i / (prezzi.length - 1)) * W;
+          const y = H - ((p - min) / range) * (H - 4) - 2;
+          return `${x},${y}`;
+        }).join(' ');
+        const trend = prezzi[prezzi.length - 1] <= prezzi[0];
+        return (
+          <div className="mt-2 flex items-center gap-2">
+            <svg width={W} height={H} className="overflow-visible">
+              <polyline fill="none" stroke={trend ? '#16a34a' : '#dc2626'} strokeWidth="1.5" points={pts} />
+              {prezzi.map((p, i) => {
+                const x = (i / (prezzi.length - 1)) * W;
+                const y = H - ((p - min) / range) * (H - 4) - 2;
+                return <circle key={i} cx={x} cy={y} r="2" fill={trend ? '#16a34a' : '#dc2626'} />;
+              })}
+            </svg>
+            <span className={`text-[10px] font-medium ${trend ? 'text-green-600' : 'text-red-500'}`}>
+              {storici.length + 1} sett.
+            </span>
+          </div>
+        );
+      })()}
+
       <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-gray-50">
         <span className={`px-2 py-1 rounded-md text-xs font-bold ${badgeColor}`}>
           {offerta.insegna}
@@ -175,44 +221,106 @@ const ProductCard = ({ offerta }) => {
 // 5. TAB 1: OFFERTE
 // ==========================================
 
-const TabOfferte = ({ offerte }) => {
+const ORDINAMENTI = [
+  { id: 'prezzo_asc', label: 'Prezzo ↑' },
+  { id: 'prezzo_desc', label: 'Prezzo ↓' },
+  { id: 'prezzo_kg', label: '€/Kg ↑' },
+  { id: 'scadenza', label: 'Scadenza' },
+  { id: 'insegna', label: 'Negozio' },
+];
+
+const TabOfferte = ({ offerte, archivio = [] }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState('tutte');
+  const [soloAttivi, setSoloAttivi] = useState(false);
+  const [ordinamento, setOrdinamento] = useState('prezzo_asc');
+  const [showOrdinamento, setShowOrdinamento] = useState(false);
+  const oggi = getOggi();
 
   const filteredOfferte = useMemo(() => {
     let result = offerte;
-    
+
+    // Filtro solo attivi oggi (scadenza = oggi)
+    if (soloAttivi) {
+      result = result.filter(o => o.valido_fino === oggi);
+    }
+
     if (activeCategory !== 'tutte') {
       result = result.filter(o => o.categoria === activeCategory);
     }
-    
+
+    // DEDUPLICAZIONE: stesso nome+marca+insegna → tieni solo il prezzo più basso
+    const seen = new Map();
+    result.forEach(o => {
+      const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
+      if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
+    });
+    result = [...seen.values()];
+
     if (searchQuery.trim() !== '') {
       const q = searchQuery.toLowerCase().trim();
-      result = result.filter(o => 
+      result = result.filter(o =>
         (o.nome && o.nome.toLowerCase().includes(q)) ||
         (o.marca && o.marca.toLowerCase().includes(q)) ||
         (o.insegna && o.insegna.toLowerCase().includes(q))
       );
-    } else {
-      // Sort by lowest price inside the category if no search
-      result = [...result].sort((a, b) => a.prezzo - b.prezzo);
     }
-    
+
+    // Ordinamento
+    result = [...result].sort((a, b) => {
+      if (ordinamento === 'prezzo_asc') return a.prezzo - b.prezzo;
+      if (ordinamento === 'prezzo_desc') return b.prezzo - a.prezzo;
+      if (ordinamento === 'prezzo_kg') return (a.prezzo_kg || 999) - (b.prezzo_kg || 999);
+      if (ordinamento === 'scadenza') return (a.valido_fino || '').localeCompare(b.valido_fino || '');
+      if (ordinamento === 'insegna') return (a.insegna || '').localeCompare(b.insegna || '');
+      return 0;
+    });
+
     return result;
-  }, [offerte, searchQuery, activeCategory]);
+  }, [offerte, searchQuery, activeCategory, soloAttivi, ordinamento, oggi]);
 
   return (
     <div className="flex flex-col h-full bg-gray-50 pb-20">
       {/* Header Fissato */}
       <div className="sticky top-0 bg-white shadow-sm z-10 px-4 py-3 pb-0">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <ShoppingCart className="text-green-600" size={24} />
             <h1 className="text-xl font-bold text-gray-900 tracking-tight">RomaRisparmia</h1>
           </div>
-          <span className="text-xs text-gray-500 flex items-center gap-1">
-            <MapPin size={12} /> Roma
-          </span>
+          <div className="flex items-center gap-2">
+            {/* Filtro attivi oggi */}
+            <button
+              onClick={() => setSoloAttivi(v => !v)}
+              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                soloAttivi ? 'bg-red-50 text-red-700 border-red-200' : 'bg-gray-50 text-gray-500 border-gray-200'
+              }`}
+            >
+              <Clock size={12} /> Scade oggi
+            </button>
+            {/* Ordinamento */}
+            <div className="relative">
+              <button
+                onClick={() => setShowOrdinamento(v => !v)}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border bg-gray-50 text-gray-500 border-gray-200"
+              >
+                <SlidersHorizontal size={12} />
+              </button>
+              {showOrdinamento && (
+                <div className="absolute right-0 top-8 bg-white border border-gray-200 rounded-xl shadow-lg z-50 overflow-hidden w-36">
+                  {ORDINAMENTI.map(o => (
+                    <button
+                      key={o.id}
+                      onClick={() => { setOrdinamento(o.id); setShowOrdinamento(false); }}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${ordinamento === o.id ? 'text-green-600 font-semibold' : 'text-gray-700'}`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Search Bar */}
@@ -250,14 +358,24 @@ const TabOfferte = ({ offerte }) => {
       {/* Lista Offerte */}
       <div className="p-4 overflow-y-auto">
         <div className="mb-2 text-sm text-gray-500 flex justify-between items-center">
-          <span>{filteredOfferte.length} offerte trovate</span>
-          {searchQuery === '' && <span className="flex items-center gap-1"><TrendingDown size={14}/> Prezzo minore</span>}
+          <span>{filteredOfferte.length} offerte {soloAttivi ? 'scadono oggi' : 'trovate'}</span>
+          <span className="flex items-center gap-1 text-xs">
+            {ORDINAMENTI.find(o => o.id === ordinamento)?.label}
+          </span>
         </div>
-        
+
         {filteredOfferte.length > 0 ? (
-          filteredOfferte.map(offerta => (
-            <ProductCard key={offerta.id} offerta={offerta} />
-          ))
+          filteredOfferte.map(offerta => {
+            const storicoMatch = archivio
+              .filter(a =>
+                a.insegna === offerta.insegna &&
+                a.nome && offerta.nome &&
+                a.nome.toLowerCase() === offerta.nome.toLowerCase()
+              )
+              .sort((a, b) => (b.valido_fino || '').localeCompare(a.valido_fino || ''))
+              [0] || null;
+            return <ProductCard key={offerta.id} offerta={offerta} storico={storicoMatch} archivio={archivio} />;
+          })
         ) : (
           <div className="text-center py-10">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-100 mb-4">
@@ -276,19 +394,37 @@ const TabOfferte = ({ offerte }) => {
 // 6. TAB 2: LISTA SPESA (L'Algoritmo)
 // ==========================================
 
-const TabListaSpesa = ({ offerte }) => {
+const TabListaSpesa = ({ offerte, archivio = [] }) => {
   const [listaText, setListaText] = useState(() => {
-    // Carica la lista salvata in precedenza (se esiste)
     const saved = localStorage.getItem('romaRisparmia_lista');
     return saved !== null ? saved : "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale";
   });
   const [risultato, setRisultato] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showStorico, setShowStorico] = useState(false);
 
-  // Salva automaticamente la lista ogni volta che viene modificata
+  // Storico liste: array di { data, lista, vincitore, totale }
+  const [storicoListe, setStoricoListe] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('romaRisparmia_storico') || '[]'); }
+    catch { return []; }
+  });
+
+  // Salva automaticamente la lista corrente
   useEffect(() => {
     localStorage.setItem('romaRisparmia_lista', listaText);
   }, [listaText]);
+
+  const salvaInStorico = (lista, vincitore, totale) => {
+    const nuovaVoce = {
+      data: new Date().toLocaleDateString('it-IT'),
+      lista,
+      vincitore,
+      totale: totale.toFixed(2)
+    };
+    const aggiornato = [nuovaVoce, ...storicoListe].slice(0, 10); // max 10 liste
+    setStoricoListe(aggiornato);
+    localStorage.setItem('romaRisparmia_storico', JSON.stringify(aggiornato));
+  };
 
   const analizzaSpesa = () => {
     setIsAnalyzing(true);
@@ -385,14 +521,16 @@ const TabListaSpesa = ({ offerte }) => {
 
       // Imposta il vincitore e salva le alternative per il confronto
       if (storeResults.length > 0 && storeResults[0].punteggio > 0) {
+        const vincitore = storeResults[0];
         setRisultato({
-          vincitore: storeResults[0],
-          // Prendi fino a 3 alternative che hanno trovato almeno un prodotto
-          alternative: storeResults.slice(1).filter(r => r.punteggio > 0).slice(0, 3) 
+          vincitore,
+          alternative: storeResults.slice(1).filter(r => r.punteggio > 0).slice(0, 3)
         });
+        // Salva nello storico
+        salvaInStorico(items, vincitore.insegna, vincitore.totalePrezzo);
       } else {
         setRisultato({
-          vincitore: storeResults[0], // Nessun match trovato
+          vincitore: storeResults[0],
           alternative: []
         });
       }
@@ -420,20 +558,57 @@ const TabListaSpesa = ({ offerte }) => {
             onChange={(e) => setListaText(e.target.value)}
             placeholder="es.&#10;pane&#10;latte&#10;uova"
           />
-          <button
-            onClick={analizzaSpesa}
-            disabled={isAnalyzing || listaText.trim().length === 0}
-            className="w-full mt-3 bg-gray-900 hover:bg-black text-white font-semibold py-3 px-4 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2 shadow-md"
-          >
-            {isAnalyzing ? (
-              <span className="animate-pulse">Ricerca in corso...</span>
-            ) : (
-              <>
-                <Search size={18} /> Trova il supermercato migliore
-              </>
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={analizzaSpesa}
+              disabled={isAnalyzing || listaText.trim().length === 0}
+              className="flex-1 bg-gray-900 hover:bg-black text-white font-semibold py-3 px-4 rounded-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2 shadow-md"
+            >
+              {isAnalyzing ? (
+                <span className="animate-pulse">Ricerca in corso...</span>
+              ) : (
+                <><Search size={18} /> Trova il migliore</>
+              )}
+            </button>
+            {storicoListe.length > 0 && (
+              <button
+                onClick={() => setShowStorico(v => !v)}
+                className={`px-3 py-3 rounded-xl border transition-colors ${showStorico ? 'bg-green-50 border-green-200 text-green-700' : 'bg-gray-50 border-gray-200 text-gray-500'}`}
+              >
+                <History size={18} />
+              </button>
             )}
-          </button>
+          </div>
         </div>
+
+        {/* Storico Liste */}
+        {showStorico && storicoListe.length > 0 && (
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-4">
+            <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+              <History size={16} className="text-gray-500" /> Ultime liste
+            </h3>
+            <div className="space-y-2">
+              {storicoListe.map((voce, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between p-3 bg-gray-50 rounded-xl cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => { setListaText(voce.lista.join('\n')); setShowStorico(false); }}
+                >
+                  <div>
+                    <div className="text-xs text-gray-400">{voce.data}</div>
+                    <div className="text-sm font-medium text-gray-800 mt-0.5">
+                      {voce.lista.slice(0, 3).join(', ')}{voce.lista.length > 3 ? '...' : ''}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs font-bold text-green-700">{voce.vincitore}</div>
+                    <div className="text-xs text-gray-500">€{voce.totale}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {risultato && (
           <div className="animate-fade-in-up">
@@ -718,12 +893,13 @@ const TabSupermercati = ({ offerte, statoVolantini }) => {
 // ==========================================
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('offerte');
+  const [activeTab, setActiveTab] = useState('lista');
   const [offerte, setOfferte] = useState([]);
   const [statoVolantini, setStatoVolantini] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isDemoMode, setIsDemoMode] = useState(false);
+  const [archivio, setArchivio] = useState([]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -742,21 +918,44 @@ export default function App() {
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         
-        // Fetch Offerte
+        // Fetch Offerte attive
         const offerteCol = collection(db, 'offerte_attive');
         const offerteSnapshot = await getDocs(offerteCol);
-        const offerteList = offerteSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const oggi = new Date().toISOString().split('T')[0];
+        // FILTRA SCADUTI: mostra solo offerte con valido_fino >= oggi
+        const offerteList = offerteSnapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() }))
+          .filter(o => !o.valido_fino || o.valido_fino >= oggi);
         
-        // Fetch Stato
+        // Fetch Stato volantini
         const statoCol = collection(db, 'stato_volantini');
         const statoSnapshot = await getDocs(statoCol);
         const statoList = statoSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+
+        // Fetch Archivio per dati storici (ultime 8 settimane)
+        // Struttura: archivio_offerte/{data_insegna}/prodotti/{docId}
+        let archivioList = [];
+        try {
+          const archivioCol = collection(db, 'archivio_offerte');
+          const archivioSnapshot = await getDocs(archivioCol);
+          // Per ogni documento archivio (es. "2026-04-07_agora") carica i prodotti
+          const archivioPromises = archivioSnapshot.docs.slice(0, 20).map(async (archDoc) => {
+            const prodCol = collection(db, 'archivio_offerte', archDoc.id, 'prodotti');
+            const prodSnap = await getDocs(prodCol);
+            return prodSnap.docs.map(d => ({ ...d.data(), _archivio_id: archDoc.id }));
+          });
+          const archivioNested = await Promise.all(archivioPromises);
+          archivioList = archivioNested.flat();
+        } catch (e) {
+          // Archivio potrebbe essere vuoto, non è un errore bloccante
+        }
 
         if (offerteList.length === 0) {
           setError("Nessuna offerta disponibile questa settimana.");
         } else {
           setOfferte(offerteList);
           setStatoVolantini(statoList);
+          setArchivio(archivioList);
         }
       } catch (err) {
         console.error("Errore fetch Firebase:", err);
@@ -804,9 +1003,9 @@ export default function App() {
           </div>
         ) : (
           <>
-            {activeTab === 'offerte' && <TabOfferte offerte={offerte} />}
+            {activeTab === 'offerte' && <TabOfferte offerte={offerte} archivio={archivio} />}
             {activeTab === 'negozi' && <TabSupermercati offerte={offerte} statoVolantini={statoVolantini} />}
-            {activeTab === 'lista' && <TabListaSpesa offerte={offerte} />}
+            {activeTab === 'lista' && <TabListaSpesa offerte={offerte} archivio={archivio} />}
             {activeTab === 'stato' && <TabStato statoVolantini={statoVolantini} />}
           </>
         )}
@@ -814,6 +1013,14 @@ export default function App() {
 
       {/* Bottom Navigation Bar */}
       <div className="absolute bottom-0 w-full bg-white border-t border-gray-200 px-2 pt-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] z-50 flex justify-around">
+        <button 
+          onClick={() => setActiveTab('lista')}
+          className={`flex flex-col items-center justify-center w-16 py-1 transition-colors ${activeTab === 'lista' ? 'text-green-600' : 'text-gray-400 hover:text-gray-600'}`}
+        >
+          <ListTodo size={24} />
+          <span className="text-[10px] mt-1 font-medium">Spesa</span>
+        </button>
+
         <button 
           onClick={() => setActiveTab('offerte')}
           className={`flex flex-col items-center justify-center w-16 py-1 transition-colors ${activeTab === 'offerte' ? 'text-green-600' : 'text-gray-400 hover:text-gray-600'}`}
@@ -828,14 +1035,6 @@ export default function App() {
         >
           <Store size={24} className={activeTab === 'negozi' ? 'fill-green-50' : ''} />
           <span className="text-[10px] mt-1 font-medium">Negozi</span>
-        </button>
-
-        <button 
-          onClick={() => setActiveTab('lista')}
-          className={`flex flex-col items-center justify-center w-16 py-1 transition-colors ${activeTab === 'lista' ? 'text-green-600' : 'text-gray-400 hover:text-gray-600'}`}
-        >
-          <ListTodo size={24} />
-          <span className="text-[10px] mt-1 font-medium">Spesa</span>
         </button>
         
         <button 
