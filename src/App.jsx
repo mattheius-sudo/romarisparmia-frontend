@@ -870,7 +870,7 @@ const TabScontrino = () => {
     // Valida che sia un'immagine
     if (!file.type.startsWith('image/')) {
       setStato('errore');
-      setMessaggio('Seleziona un'immagine dello scontrino.');
+      setMessaggio("Seleziona un'immagine dello scontrino.");
       return;
     }
 
