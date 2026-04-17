@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
-import { AuthProvider, useAuth } from './AuthContext';
+import { AuthProvider, useAuth, INSEGNE_DISPONIBILI } from './AuthContext';
 import {
   Search,
   ListTodo,
@@ -347,10 +347,257 @@ const SchermataLogin = () => {
   );
 };
 
+// ─── Sezione: I Miei Supermercati ─────────────────────────────────────────────
+
+const SezioneSupermercati = () => {
+  const { preferenze, toggleInsegna, aggiornaTessera } = useAuth();
+  const [tesseraAperta, setTesseraAperta] = useState(null);
+  const [numeroInput, setNumeroInput] = useState('');
+
+  const insegneAttive = preferenze?.insegne_attive || [...INSEGNE_DISPONIBILI];
+  const tessere = preferenze?.tessere || {};
+
+  const apriTessera = (insegna) => {
+    setTesseraAperta(insegna);
+    setNumeroInput(tessere[insegna]?.numero || '');
+  };
+
+  const salvaTessera = async (insegna) => {
+    await aggiornaTessera(insegna, true, numeroInput);
+    setTesseraAperta(null);
+  };
+
+  return (
+    <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+      <h3 className="text-xs font-medium uppercase tracking-wider mb-1" style={{ color: T.textSec }}>
+        I miei supermercati
+      </h3>
+      <p className="text-xs mb-4" style={{ color: T.textSec }}>
+        Il Verdetto Spesa considera solo i supermercati attivi.
+      </p>
+      <div className="space-y-2">
+        {INSEGNE_DISPONIBILI.map(insegna => {
+          const attiva = insegneAttive.includes(insegna);
+          const tessera = tessere[insegna];
+          const hasTessera = tessera?.attiva;
+          return (
+            <div key={insegna}>
+              <div className="flex items-center gap-3 py-2">
+                {/* Toggle attiva/disattiva */}
+                <button
+                  onClick={() => toggleInsegna(insegna)}
+                  className="flex items-center gap-2 flex-1 active:scale-[0.99] transition-all"
+                >
+                  <div className="w-11 h-6 rounded-full relative transition-colors flex-shrink-0"
+                    style={{ background: attiva ? T.primary : T.border }}>
+                    <div className="w-5 h-5 rounded-full absolute top-0.5 transition-all"
+                      style={{ background: '#fff', left: attiva ? '22px' : '2px', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+                  </div>
+                  <span className="text-sm font-medium" style={{ color: attiva ? T.textPrimary : T.textSec }}>
+                    {insegna}
+                  </span>
+                </button>
+                {/* Badge tessera */}
+                {attiva && (
+                  <button
+                    onClick={() => apriTessera(insegna)}
+                    className="text-xs px-2.5 py-1 rounded-lg transition-all"
+                    style={hasTessera
+                      ? { background: '#EEF2E4', color: T.primary, border: `1px solid #C8D9A0` }
+                      : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }
+                    }
+                  >
+                    {hasTessera ? '🪪 ' + (tessera.numero ? tessera.numero.slice(0, 6) + '…' : 'Tessera') : '+ Tessera'}
+                  </button>
+                )}
+              </div>
+              {/* Pannello inserimento numero tessera */}
+              {tesseraAperta === insegna && (
+                <div className="mt-1 mb-2 p-3 rounded-2xl" style={{ background: T.bg, border: `1px solid ${T.border}` }}>
+                  <p className="text-xs mb-2" style={{ color: T.textSec }}>Numero carta fedeltà {insegna}</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={numeroInput}
+                      onChange={e => setNumeroInput(e.target.value)}
+                      placeholder="Es. 1234567890"
+                      className="flex-1 px-3 py-2 rounded-xl text-sm outline-none"
+                      style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
+                    />
+                    <button
+                      onClick={() => salvaTessera(insegna)}
+                      className="px-4 py-2 rounded-xl text-sm font-medium text-white"
+                      style={{ background: T.primary }}
+                    >
+                      Salva
+                    </button>
+                    <button
+                      onClick={() => setTesseraAperta(null)}
+                      className="px-3 py-2 rounded-xl text-sm"
+                      style={{ color: T.textSec }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {tessera?.numero && (
+                    <button
+                      onClick={() => { aggiornaTessera(insegna, false, ''); setTesseraAperta(null); }}
+                      className="text-xs mt-2" style={{ color: '#DC2626' }}
+                    >
+                      Rimuovi tessera
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+// ─── Sezione: Prodotti Preferiti ───────────────────────────────────────────────
+
+const SezioneProdottiPreferiti = () => {
+  const { prodottiPreferiti, aggiungiProdottoPreferito, rimuoviProdottoPreferito } = useAuth();
+  const [mostraForm, setMostraForm] = useState(false);
+  const [form, setForm] = useState({ label: '', nome_ricerca: '', marca: '', grammatura: '', categoria: 'dispensa' });
+
+  const items = prodottiPreferiti?.items || [];
+
+  const handleAggiungi = async () => {
+    if (!form.label.trim()) return;
+    await aggiungiProdottoPreferito({
+      label: form.label.trim(),
+      nome_ricerca: form.nome_ricerca.trim() || form.label.trim().toLowerCase(),
+      marca: form.marca.trim(),
+      grammatura: form.grammatura.trim(),
+      categoria: form.categoria,
+    });
+    setForm({ label: '', nome_ricerca: '', marca: '', grammatura: '', categoria: 'dispensa' });
+    setMostraForm(false);
+  };
+
+  return (
+    <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+      <div className="flex justify-between items-center mb-1">
+        <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: T.textSec }}>
+          Prodotti preferiti
+        </h3>
+        <button
+          onClick={() => setMostraForm(v => !v)}
+          className="text-xs px-3 py-1 rounded-full font-medium"
+          style={{ background: '#EEF2E4', color: T.primary }}
+        >
+          + Aggiungi
+        </button>
+      </div>
+      <p className="text-xs mb-4" style={{ color: T.textSec }}>
+        Vengono cercati automaticamente nel Verdetto Spesa con la marca esatta.
+      </p>
+
+      {/* Form aggiunta */}
+      {mostraForm && (
+        <div className="mb-4 p-4 rounded-2xl space-y-3" style={{ background: T.bg, border: `1px solid ${T.border}` }}>
+          <div>
+            <label className="text-xs font-medium mb-1 block" style={{ color: T.textSec }}>
+              Nome breve (come appare nella lista)
+            </label>
+            <input
+              value={form.label}
+              onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
+              placeholder="Es. Latte Arborea"
+              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium mb-1 block" style={{ color: T.textSec }}>
+              Termine di ricerca esteso (per trovarlo nelle offerte)
+            </label>
+            <input
+              value={form.nome_ricerca}
+              onChange={e => setForm(f => ({ ...f, nome_ricerca: e.target.value }))}
+              placeholder="Es. latte parzialmente scremato arborea"
+              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
+            />
+            <p className="text-xs mt-1" style={{ color: T.textSec }}>Se vuoto, usa il nome breve</p>
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={form.marca}
+              onChange={e => setForm(f => ({ ...f, marca: e.target.value }))}
+              placeholder="Marca"
+              className="flex-1 px-3 py-2.5 rounded-xl text-sm outline-none"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
+            />
+            <input
+              value={form.grammatura}
+              onChange={e => setForm(f => ({ ...f, grammatura: e.target.value }))}
+              placeholder="Formato"
+              className="w-24 px-3 py-2.5 rounded-xl text-sm outline-none"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
+            />
+          </div>
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={handleAggiungi}
+              className="flex-1 py-2.5 rounded-xl text-sm font-medium text-white"
+              style={{ background: T.primary }}
+            >
+              Salva prodotto
+            </button>
+            <button
+              onClick={() => setMostraForm(false)}
+              className="px-4 py-2.5 rounded-xl text-sm"
+              style={{ color: T.textSec, border: `1px solid ${T.border}` }}
+            >
+              Annulla
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Lista prodotti preferiti */}
+      {items.length === 0 ? (
+        <p className="text-sm text-center py-4" style={{ color: T.textSec }}>
+          Nessun prodotto preferito ancora. Aggiungine uno!
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {items.map(p => (
+            <div key={p.id} className="flex items-center justify-between py-2"
+              style={{ borderBottom: `1px solid ${T.border}` }}>
+              <div className="flex-1">
+                <span className="text-sm font-medium" style={{ color: T.textPrimary }}>{p.label}</span>
+                {p.marca && <span className="text-xs ml-2" style={{ color: T.textSec }}>{p.marca}</span>}
+                {p.grammatura && <span className="text-xs ml-1" style={{ color: T.textSec }}>{p.grammatura}</span>}
+                {p.nome_ricerca && p.nome_ricerca !== p.label.toLowerCase() && (
+                  <p className="text-xs mt-0.5" style={{ color: T.textSec }}>🔍 "{p.nome_ricerca}"</p>
+                )}
+              </div>
+              <button
+                onClick={() => rimuoviProdottoPreferito(p.id)}
+                className="ml-3 text-xs px-2 py-1 rounded-lg"
+                style={{ color: '#DC2626', background: '#FEF2F2' }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Tab Profilo ──────────────────────────────────────────────────────────────
 
 const TabProfilo = () => {
   const { utente, profilo, logout, isLoggedIn } = useAuth();
+  const [sezione, setSezione] = useState('account'); // 'account' | 'supermercati' | 'prodotti'
   if (!isLoggedIn) return <SchermataLogin />;
 
   const livello = getLivello(profilo?.punti || 0);
@@ -361,11 +608,17 @@ const TabProfilo = () => {
   const puntiBase = LIVELLI[livelloIdx]?.min || 0;
   const progressoPerc = prossimoLivello ? Math.round(((puntiAttuali - puntiBase) / (puntiProssimo - puntiBase)) * 100) : 100;
 
+  const TAB_PROFILO = [
+    { id: 'account', label: 'Account' },
+    { id: 'supermercati', label: 'Supermercati' },
+    { id: 'prodotti', label: 'Preferiti' },
+  ];
+
   return (
     <div className="flex flex-col h-full pb-32 overflow-y-auto" style={{ background: T.bg }}>
       {/* Header */}
-      <div className="px-5 pt-8 pb-6" style={{ background: T.surface, borderBottom: `1px solid ${T.border}` }}>
-        <div className="flex items-center gap-4">
+      <div className="px-5 pt-8 pb-5" style={{ background: T.surface, borderBottom: `1px solid ${T.border}` }}>
+        <div className="flex items-center gap-4 mb-5">
           {utente.photoURL
             ? <img src={utente.photoURL} alt="avatar" className="w-16 h-16 rounded-full" style={{ border: `2px solid ${T.border}` }} />
             : <div className="w-16 h-16 rounded-full flex items-center justify-center text-white text-2xl font-bold" style={{ background: T.primary }}>
@@ -382,103 +635,123 @@ const TabProfilo = () => {
             </span>
           </div>
         </div>
+        {/* Sub-tab navigation */}
+        <div className="flex gap-2">
+          {TAB_PROFILO.map(t => (
+            <button key={t.id} onClick={() => setSezione(t.id)}
+              className="px-4 py-1.5 rounded-full text-xs font-medium transition-all"
+              style={sezione === t.id
+                ? { background: T.primary, color: '#fff' }
+                : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }
+              }>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="px-4 py-4 space-y-3">
-        {/* Card punti */}
-        <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
-          <div className="flex justify-between items-center mb-4">
-            <span className="text-sm font-medium" style={{ color: T.textSec }}>I tuoi punti</span>
-            <span className="text-3xl font-medium" style={{ color: T.primary, fontFamily: "'Lora', serif" }}>{puntiAttuali}</span>
-          </div>
-          {prossimoLivello && (
-            <>
-              <div className="flex justify-between text-xs mb-2" style={{ color: T.textSec }}>
-                <span>{livello.nome}</span>
-                <span>{prossimoLivello.nome} · {puntiProssimo} pt</span>
+        {sezione === 'account' && (
+          <>
+            {/* Card punti */}
+            <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <div className="flex justify-between items-center mb-4">
+                <span className="text-sm font-medium" style={{ color: T.textSec }}>I tuoi punti</span>
+                <span className="text-3xl font-medium" style={{ color: T.primary, fontFamily: "'Lora', serif" }}>{puntiAttuali}</span>
               </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: T.border }}>
-                <div className="h-full rounded-full transition-all" style={{ width: `${progressoPerc}%`, background: T.primary }} />
-              </div>
-              <p className="text-xs mt-2 text-center" style={{ color: T.textSec }}>
-                {puntiProssimo - puntiAttuali} punti al prossimo livello
-              </p>
-            </>
-          )}
-        </div>
-
-        {/* Come guadagnare */}
-        <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
-          <h3 className="text-xs font-medium uppercase tracking-wider mb-4" style={{ color: T.textSec }}>Come guadagnare punti</h3>
-          <div className="space-y-3">
-            {[
-              { azione: 'Scontrino caricato e verificato', punti: '+15' },
-              { azione: 'Scontrino con più di 10 prodotti', punti: '+5' },
-              { azione: 'Insegna poco coperta (CTS, Elite...)', punti: '+10' },
-              { azione: 'Primo scontrino della settimana', punti: '+5' },
-            ].map((item, i) => (
-              <div key={i} className="flex justify-between items-center">
-                <span className="text-sm" style={{ color: T.textPrimary }}>{item.azione}</span>
-                <span className="text-sm font-semibold ml-3 shrink-0" style={{ color: T.primary }}>{item.punti}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Sblocchi */}
-        <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
-          <h3 className="text-xs font-medium uppercase tracking-wider mb-4" style={{ color: T.textSec }}>Livelli e sblocchi</h3>
-          <div className="space-y-3">
-            {LIVELLI.map((l) => {
-              const sbloccato = puntiAttuali >= l.min;
-              return (
-                <div key={l.nome} className={`flex items-center gap-3 ${sbloccato ? '' : 'opacity-35'}`}>
-                  <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full shrink-0 ${l.colore}`}>{l.nome}</span>
-                  <span className="text-xs" style={{ color: T.textSec }}>
-                    {l.min === 0 && 'Accesso base'}
-                    {l.min === 50 && 'Storico spesa 6 mesi'}
-                    {l.min === 150 && 'Notifiche offerte sui tuoi prodotti'}
-                    {l.min === 400 && 'Offerte 24h in anticipo'}
-                    {l.min === 1000 && 'Insights predittivi + badge speciale'}
-                  </span>
-                  {sbloccato && <span className="ml-auto text-xs" style={{ color: T.primary }}>✓</span>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Piano */}
-        <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
-          <div className="flex justify-between items-center">
-            <div>
-              <h3 className="text-sm font-medium" style={{ color: T.textPrimary }}>Piano attuale</h3>
-              <p className="text-xs mt-0.5" style={{ color: T.textSec }}>
-                {profilo?.piano === 'premium' ? 'Premium attivo' : 'Gratuito'}
-              </p>
+              {prossimoLivello && (
+                <>
+                  <div className="flex justify-between text-xs mb-2" style={{ color: T.textSec }}>
+                    <span>{livello.nome}</span>
+                    <span>{prossimoLivello.nome} · {puntiProssimo} pt</span>
+                  </div>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: T.border }}>
+                    <div className="h-full rounded-full transition-all" style={{ width: `${progressoPerc}%`, background: T.primary }} />
+                  </div>
+                  <p className="text-xs mt-2 text-center" style={{ color: T.textSec }}>
+                    {puntiProssimo - puntiAttuali} punti al prossimo livello
+                  </p>
+                </>
+              )}
             </div>
-            <span className={`text-xs font-bold px-3 py-1.5 rounded-full ${profilo?.piano === 'premium' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-stone-100 text-stone-600'}`}>
-              {profilo?.piano === 'premium' ? 'PREMIUM' : 'FREE'}
-            </span>
-          </div>
-        </div>
 
-        {/* Azioni */}
-        <div className="rounded-[20px] overflow-hidden" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
-          <button onClick={logout} className="w-full flex items-center gap-3 px-5 py-4 transition-colors hover:bg-red-50 active:scale-[0.99]"
-            style={{ borderBottom: `1px solid ${T.border}` }}>
-            <LogOut size={17} strokeWidth={1.5} className="text-red-500" />
-            <span className="text-sm" style={{ color: '#DC2626' }}>Esci dall'account</span>
-            <ChevronRight size={15} className="ml-auto text-gray-300" />
-          </button>
-          <button onClick={() => alert('In arrivo nel prossimo sprint.')}
-            className="w-full flex items-center gap-3 px-5 py-4 transition-colors active:scale-[0.99]"
-            style={{ color: T.textSec }}>
-            <X size={17} strokeWidth={1.5} />
-            <span className="text-sm">Cancella i miei dati</span>
-            <ChevronRight size={15} className="ml-auto text-gray-300" />
-          </button>
-        </div>
+            {/* Come guadagnare */}
+            <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <h3 className="text-xs font-medium uppercase tracking-wider mb-4" style={{ color: T.textSec }}>Come guadagnare punti</h3>
+              <div className="space-y-3">
+                {[
+                  { azione: 'Scontrino caricato e verificato', punti: '+15' },
+                  { azione: 'Scontrino con più di 10 prodotti', punti: '+5' },
+                  { azione: 'Insegna poco coperta (CTS, Elite...)', punti: '+10' },
+                  { azione: 'Primo scontrino della settimana', punti: '+5' },
+                ].map((item, i) => (
+                  <div key={i} className="flex justify-between items-center">
+                    <span className="text-sm" style={{ color: T.textPrimary }}>{item.azione}</span>
+                    <span className="text-sm font-semibold ml-3 shrink-0" style={{ color: T.primary }}>{item.punti}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Sblocchi */}
+            <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <h3 className="text-xs font-medium uppercase tracking-wider mb-4" style={{ color: T.textSec }}>Livelli e sblocchi</h3>
+              <div className="space-y-3">
+                {LIVELLI.map((l) => {
+                  const sbloccato = puntiAttuali >= l.min;
+                  return (
+                    <div key={l.nome} className={`flex items-center gap-3 ${sbloccato ? '' : 'opacity-35'}`}>
+                      <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full shrink-0 ${l.colore}`}>{l.nome}</span>
+                      <span className="text-xs" style={{ color: T.textSec }}>
+                        {l.min === 0 && 'Accesso base'}
+                        {l.min === 50 && 'Storico spesa 6 mesi'}
+                        {l.min === 150 && 'Notifiche offerte sui tuoi prodotti'}
+                        {l.min === 400 && 'Offerte 24h in anticipo'}
+                        {l.min === 1000 && 'Insights predittivi + badge speciale'}
+                      </span>
+                      {sbloccato && <span className="ml-auto text-xs" style={{ color: T.primary }}>✓</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Piano */}
+            <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <div className="flex justify-between items-center">
+                <div>
+                  <h3 className="text-sm font-medium" style={{ color: T.textPrimary }}>Piano attuale</h3>
+                  <p className="text-xs mt-0.5" style={{ color: T.textSec }}>
+                    {profilo?.piano === 'premium' ? 'Premium attivo' : 'Gratuito'}
+                  </p>
+                </div>
+                <span className={`text-xs font-bold px-3 py-1.5 rounded-full ${profilo?.piano === 'premium' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-stone-100 text-stone-600'}`}>
+                  {profilo?.piano === 'premium' ? 'PREMIUM' : 'FREE'}
+                </span>
+              </div>
+            </div>
+
+            {/* Azioni */}
+            <div className="rounded-[20px] overflow-hidden" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+              <button onClick={logout} className="w-full flex items-center gap-3 px-5 py-4 transition-colors hover:bg-red-50 active:scale-[0.99]"
+                style={{ borderBottom: `1px solid ${T.border}` }}>
+                <LogOut size={17} strokeWidth={1.5} className="text-red-500" />
+                <span className="text-sm" style={{ color: '#DC2626' }}>Esci dall'account</span>
+                <ChevronRight size={15} className="ml-auto text-gray-300" />
+              </button>
+              <button onClick={() => alert('In arrivo nel prossimo sprint.')}
+                className="w-full flex items-center gap-3 px-5 py-4 transition-colors active:scale-[0.99]"
+                style={{ color: T.textSec }}>
+                <X size={17} strokeWidth={1.5} />
+                <span className="text-sm">Cancella i miei dati</span>
+                <ChevronRight size={15} className="ml-auto text-gray-300" />
+              </button>
+            </div>
+          </>
+        )}
+
+        {sezione === 'supermercati' && <SezioneSupermercati />}
+        {sezione === 'prodotti' && <SezioneProdottiPreferiti />}
       </div>
     </div>
   );
@@ -626,6 +899,9 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
 // ─── Tab Lista Spesa ──────────────────────────────────────────────────────────
 
 const TabListaSpesa = ({ offerte, archivio = [] }) => {
+  const { isLoggedIn, listaSpesa, aggiornaListaSpesa, preferenze, prodottiPreferiti } = useAuth();
+
+  // Lista come testo — sincronizzata con Firestore se loggato, localStorage se no
   const [listaText, setListaText] = useState(() => {
     try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; } catch { return "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; }
   });
@@ -636,7 +912,24 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
     try { return JSON.parse(localStorage.getItem('lenticchia_storico') || '[]'); } catch { return []; }
   });
 
-  useEffect(() => { try { localStorage.setItem('lenticchia_lista', listaText); } catch {} }, [listaText]);
+  // Sincronizza lista da cloud quando arriva (solo se loggato e diversa dall'attuale)
+  useEffect(() => {
+    if (isLoggedIn && listaSpesa?.items?.length) {
+      const testoCloud = listaSpesa.items.join('\n');
+      setListaText(testoCloud);
+    }
+  }, [listaSpesa, isLoggedIn]);
+
+  const handleListaChange = (nuovoTesto) => {
+    setListaText(nuovoTesto);
+    // Salva su localStorage sempre (fallback offline)
+    try { localStorage.setItem('lenticchia_lista', nuovoTesto); } catch {}
+    // Salva su Firestore se loggato (con debounce interno all'AuthContext)
+    if (isLoggedIn) {
+      const items = nuovoTesto.split('\n').map(i => i.trim()).filter(Boolean);
+      aggiornaListaSpesa(items);
+    }
+  };
 
   const salvaInStorico = (lista, vincitore, totale) => {
     const nuova = { data: new Date().toLocaleDateString('it-IT'), lista, vincitore, totale: totale.toFixed(2) };
@@ -648,9 +941,21 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
   const analizzaSpesa = () => {
     setIsAnalyzing(true);
     setTimeout(() => {
-      const items = listaText.split('\n').map(i => i.trim().replace(/\s+/g, ' ').replace(/[^\w\sàèéìòù'.-]/gi, '')).filter(i => i.length > 2);
+      // Costruisci items: lista spesa + prodotti preferiti con nome_ricerca estesa
+      const itemsLista = listaText.split('\n').map(i => i.trim().replace(/\s+/g, ' ').replace(/[^\w\sàèéìòù'.-]/gi, '')).filter(i => i.length > 2);
+      const itemsProdottiPreferiti = (prodottiPreferiti?.items || []).map(p => p.nome_ricerca || p.label);
+      // Unisci senza duplicati
+      const tuttiItems = [...new Set([...itemsLista, ...itemsProdottiPreferiti])];
+      const items = tuttiItems;
+
       if (!items.length) { setRisultato(null); setIsAnalyzing(false); return; }
-      const insegne = [...new Set(offerte.map(o => o.insegna))];
+
+      // Filtra per insegne attive se l'utente ha preferenze configurate
+      const insegneAttive = preferenze?.insegne_attive?.length
+        ? preferenze.insegne_attive
+        : [...new Set(offerte.map(o => o.insegna))];
+
+      const insegne = [...new Set(offerte.map(o => o.insegna))].filter(i => insegneAttive.includes(i));
       const offerteOtt = offerte.map(o => ({ ...o, sN: (o.nome||'').toLowerCase(), sM: (o.marca||'').toLowerCase(), sC: (o.categoria||'').toLowerCase() }));
       const storeResults = insegne.map(insegna => {
         const storeOffers = offerteOtt.filter(o => o.insegna === insegna);
@@ -700,7 +1005,7 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
             className="w-full p-4 rounded-2xl text-sm resize-none outline-none transition-all"
             style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif", minHeight: '140px' }}
             value={listaText}
-            onChange={(e) => setListaText(e.target.value)}
+            onChange={(e) => handleListaChange(e.target.value)}
             placeholder={"pane\nlatte\nuova\n..."}
           />
           <div className="flex gap-2 mt-4">
@@ -1013,6 +1318,18 @@ function AppInterna() {
       </div>
     );
   }
+
+  // ── BETA GATE — rimuovere per il lancio pubblico ──────────────────────────
+  // Per passare al modello ibrido: rimuovere questo blocco e aggiungere
+  // un PrivateRoute solo sui tab 'lista' e 'profilo'.
+  if (!utente) {
+    return (
+      <div className="w-full max-w-md mx-auto min-h-screen relative" style={{ background: T.bg }}>
+        <SchermataLogin />
+      </div>
+    );
+  }
+  // ── FINE BETA GATE ────────────────────────────────────────────────────────
 
   if (utente && profilo && profilo.onboarding_completato === false) {
     return (
