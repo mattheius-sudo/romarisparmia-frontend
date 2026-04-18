@@ -32,7 +32,11 @@ import {
   CreditCard,
   ArrowUpRight,
   ArrowDownRight,
-  Wallet
+  Wallet,
+  ClipboardCheck,
+  Pencil,
+  AlertTriangle,
+  Flag
 } from 'lucide-react';
 
 // ─── Font import (Lora + DM Sans via Google Fonts) ───────────────────────────
@@ -255,9 +259,156 @@ const LIVELLI = [
 const getLivello = (p = 0) => [...LIVELLI].reverse().find(l => p >= l.min) || LIVELLI[0];
 const getProssimoLivello = (p = 0) => { const i = LIVELLI.findIndex(l => p < l.min); return i === -1 ? null : LIVELLI[i]; };
 
-// ─── ProductCard (design Gemini) ──────────────────────────────────────────────
+// ─── Segnalazione errore prezzi (Task 2) ──────────────────────────────────────
+// Architettura:
+//   - useSegnalazioniStore() → chiamato UNA VOLTA in TabOfferte
+//   - passa { segnalazioniInviate, segnala } giù alle card come props
+//   - UI ottimistica: la bandierina diventa rossa immediatamente
+//   - Firestore: increment atomico su campo "segnalazioni"
+//   - Se segnalazioni >= SOGLIA → nascosto:true → sparisce dalla vista pubblica
 
-const ProductCard = ({ offerta, storico = null, archivio = [], index = 0 }) => {
+const SOGLIA_SEGNALAZIONI = 3;
+
+const useSegnalazioniStore = () => {
+  // Set dei docId già segnalati in questa sessione (per UI ottimistica)
+  const [segnalati, setSegnalati] = useState(new Set());
+
+  const segnala = async (collectionName, docId) => {
+    if (segnalati.has(docId)) return; // già segnalato
+
+    // UI ottimistica immediata
+    setSegnalati(prev => new Set([...prev, docId]));
+
+    try {
+      const firestoreModule = await import('firebase/firestore');
+      const { doc, updateDoc, increment, getDoc } = firestoreModule;
+      const { db } = await import('./firebase');
+
+      const ref = doc(db, collectionName, docId);
+      await updateDoc(ref, { segnalazioni: increment(1) });
+
+      // Nascondi automaticamente se raggiunge la soglia
+      const snap = await getDoc(ref);
+      if (snap.exists() && (snap.data().segnalazioni || 0) >= SOGLIA_SEGNALAZIONI) {
+        await updateDoc(ref, { nascosto: true });
+      }
+    } catch (err) {
+      console.error('Errore segnalazione:', err);
+      // Rollback ottimismo solo in caso di errore di rete
+      setSegnalati(prev => { const n = new Set(prev); n.delete(docId); return n; });
+    }
+  };
+
+  return { segnalati, segnala };
+};
+
+// Bottone bandierina riutilizzabile — riceve lo store come prop
+const BottoneSegnala = ({ docId, collectionName, segnalati, segnala, size = 12 }) => {
+  const isSegnalato = segnalati.has(docId);
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); segnala(collectionName, docId); }}
+      className="p-1 rounded-full transition-all active:scale-90 shrink-0"
+      title={isSegnalato ? 'Segnalazione inviata' : 'Segnala prezzo errato'}
+      style={{ color: isSegnalato ? T.accent : T.border }}
+    >
+      <Flag size={size} strokeWidth={1.5}
+        style={{ fill: isSegnalato ? T.accent : 'none' }} />
+    </button>
+  );
+};
+
+// ─── Reputazione utente — soglie ──────────────────────────────────────────────
+const REP_CONFERME_RICHIESTE_DEFAULT = 3;  // conferme per attivare offerta
+const REP_SOGLIA_ALTA  = 70;  // 1 sola conferma per attivare
+const REP_SOGLIA_BASSA = 30;  // richiede N+2 conferme
+
+// ─── Utilità GPS ──────────────────────────────────────────────────────────────
+
+/** Distanza in metri tra due coordinate (formula Haversine) */
+const distanzaMetri = (lat1, lng1, lat2, lng2) => {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+    Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+};
+
+/** Richiede posizione corrente. Restituisce {lat, lng} o lancia errore. */
+const ottieniPosizione = () => new Promise((resolve, reject) => {
+  if (!navigator.geolocation) {
+    reject(new Error('GPS non supportato dal browser'));
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+    err => reject(new Error(
+      err.code === 1 ? 'Permesso GPS negato — abilitalo nelle impostazioni' :
+      err.code === 2 ? 'Posizione non disponibile' :
+      'Timeout GPS — riprova'
+    )),
+    { timeout: 8000, maximumAge: 60000, enableHighAccuracy: true }
+  );
+});
+
+// ─── Utilità EXIF ──────────────────────────────────────────────────────────────
+// Usa exifr via CDN (caricato lazy solo quando serve).
+// Se EXIF non disponibile (browser ha strippato i metadati) → graceful pass.
+// Blocca solo se il timestamp EXIF è verificato e > 1h nel passato.
+
+const caricaExifr = () => new Promise((resolve) => {
+  if (window.exifr) { resolve(window.exifr); return; }
+  const script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/exifr/dist/lite.umd.js';
+  script.onload = () => resolve(window.exifr);
+  script.onerror = () => resolve(null); // fallback: exifr non disponibile
+  document.head.appendChild(script);
+});
+
+/**
+ * Verifica EXIF di un file immagine.
+ * Ritorna { ok: bool, motivo: string | null, exif: obj | null, exif_verificato: bool }
+ */
+const verificaExif = async (file) => {
+  try {
+    const exifr = await caricaExifr();
+    if (!exifr) return { ok: true, motivo: null, exif: null, exif_verificato: false };
+
+    const dati = await exifr.parse(file, {
+      pick: ['DateTimeOriginal', 'DateTime', 'GPSLatitude', 'GPSLongitude'],
+      silentErrors: true,
+    }).catch(() => null);
+
+    if (!dati) return { ok: true, motivo: null, exif: null, exif_verificato: false };
+
+    const dataFoto = dati.DateTimeOriginal || dati.DateTime;
+    if (dataFoto) {
+      const diffMs = Date.now() - new Date(dataFoto).getTime();
+      const diffOre = diffMs / 3600000;
+      if (diffOre > 1) {
+        return {
+          ok: false,
+          motivo: `Foto scattata ${Math.round(diffOre)}h fa — deve essere recente (max 1h)`,
+          exif: dati,
+          exif_verificato: true,
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      motivo: null,
+      exif: dati,
+      exif_verificato: !!dataFoto,
+    };
+  } catch {
+    // Mai bloccare per errori di parsing EXIF
+    return { ok: true, motivo: null, exif: null, exif_verificato: false };
+  }
+};
+
+const ProductCard = ({ offerta, storico = null, archivio = [], index = 0, segnalati, segnala }) => {
   const oggi = getOggi();
   const domani = getDomani();
   const isScadenzaOggi = offerta.valido_fino === oggi;
@@ -348,6 +499,18 @@ const ProductCard = ({ offerta, storico = null, archivio = [], index = 0 }) => {
           <span className="flex items-center gap-1.5 px-3 py-1 rounded-lg font-semibold border" style={{ fontSize: '13px', background: '#FFF8F0', color: '#C4682A', borderColor: '#F4D5B8' }}>
             <Clock size={12} strokeWidth={1.5} /> Scade domani
           </span>
+        )}
+        {/* Segnalazione errore — allineata a destra */}
+        {segnalati && segnala && offerta.id && (
+          <div className="ml-auto">
+            <BottoneSegnala
+              docId={offerta.id}
+              collectionName="offerte_attive"
+              segnalati={segnalati}
+              segnala={segnala}
+              size={14}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -953,17 +1116,19 @@ const TabProfilo = () => {
 
 const TabScontrino = () => {
   const { utente } = useAuth();
-  const [modalita, setModalita] = useState('scontrino'); // 'scontrino' | 'volantino'
-  const [stato, setStato] = useState('idle'); // idle | anteprima | caricando | successo | errore
+  const [modalita, setModalita] = useState('scontrino');
+  const [stato, setStato] = useState('idle');
   const [messaggio, setMessaggio] = useState('');
   const [puntiAnimati, setPuntiAnimati] = useState(false);
-  const [foto, setFoto] = useState([]); // array di { file, preview, base64 }
+  const [foto, setFoto] = useState([]);
   const [insegnaVolantino, setInsegnaVolantino] = useState('');
   const [validoFino, setValidoFino] = useState('');
+  // Posizione GPS rilevata durante l'upload (metadato opzionale)
+  const [posizioneRilevata, setPosizioneRilevata] = useState(null);
   const inputRef = React.useRef(null);
   const inputVolRef = React.useRef(null);
   const MAX_FOTO = 4;
-  const MAX_FOTO_VOL = 8; // volantini possono essere più lunghi
+  const MAX_FOTO_VOL = 8;
 
   const cambiaModalita = (m) => {
     setModalita(m);
@@ -972,6 +1137,7 @@ const TabScontrino = () => {
     setMessaggio('');
     setInsegnaVolantino('');
     setValidoFino('');
+    setPosizioneRilevata(null);
   };
 
   // Comprime immagine a max 1200px, qualità 70%
@@ -1020,6 +1186,27 @@ const TabScontrino = () => {
       }
     }
 
+    // ── Verifica EXIF (solo per scontrini — serve foto recente) ──────────────
+    if (modalita === 'scontrino') {
+      for (const file of files) {
+        const { ok, motivo } = await verificaExif(file);
+        if (!ok) {
+          setMessaggio(motivo || 'Foto non valida — scatta una foto recente dello scontrino.');
+          setStato('errore');
+          return;
+        }
+      }
+    }
+
+    // ── Rileva posizione GPS in background (non bloccante) ───────────────────
+    // Per gli scontrini tentiamo il GPS — se fallisce non blocchiamo.
+    // La posizione viene salvata come metadato per future verifiche anti-frode.
+    if (!posizioneRilevata) {
+      ottieniPosizione()
+        .then(pos => setPosizioneRilevata(pos))
+        .catch(() => {}); // GPS non disponibile — non blocca l'upload
+    }
+
     const nuoveFoto = await Promise.all(files.map(async (file) => {
       const base64 = await comprimiImmagine(file);
       return { file, preview: base64, base64 };
@@ -1055,9 +1242,15 @@ const TabScontrino = () => {
         stato: 'in_attesa',
         data_caricamento: serverTimestamp(),
         note_utente: '',
+        // Metadati anti-frode (non bloccanti — presenti solo se disponibili)
+        posizione_upload: posizioneRilevata
+          ? { lat: posizioneRilevata.lat, lng: posizioneRilevata.lng }
+          : null,
+        user_agent: navigator.userAgent.slice(0, 200),
       });
 
       setFoto([]);
+      setPosizioneRilevata(null);
       setStato('successo');
       setTimeout(() => setPuntiAnimati(true), 600);
       setTimeout(() => { setStato('idle'); setPuntiAnimati(false); }, 5000);
@@ -1090,9 +1283,14 @@ const TabScontrino = () => {
         valido_fino: validoFino || null,
         stato: 'in_attesa',
         data_caricamento: serverTimestamp(),
+        // Metadati posizione (opzionale per i volantini — portati a casa)
+        posizione_upload: posizioneRilevata
+          ? { lat: posizioneRilevata.lat, lng: posizioneRilevata.lng }
+          : null,
       });
 
       setFoto([]);
+      setPosizioneRilevata(null);
       setStato('successo');
       setTimeout(() => setPuntiAnimati(true), 600);
       setTimeout(() => { setStato('idle'); setPuntiAnimati(false); setInsegnaVolantino(''); setValidoFino(''); }, 5000);
@@ -1419,9 +1617,9 @@ const TabScontrino = () => {
   );
 };
 
-// ─── ProductCard Compatta (per liste dense) ───────────────────────────────────
+// ─── ProductCard Compatta con Trust Signals (Task 2+8) ───────────────────────
 
-const ProductCardCompatta = ({ offerta, index = 0 }) => {
+const ProductCardCompatta = ({ offerta, index = 0, segnalati, segnala }) => {
   const oggi = getOggi();
   const domani = getDomani();
   const giorni = calcGiorniRimanenti(offerta.valido_fino);
@@ -1429,58 +1627,136 @@ const ProductCardCompatta = ({ offerta, index = 0 }) => {
   const isScadenzaDomani = offerta.valido_fino === domani;
   const isUrgente = giorni <= 2 && giorni >= 0;
 
+  // Stato locale per conferma "visto in negozio"
+  const [confermato, setConfermato] = useState(false);
+
+  const confermaVisto = async (e) => {
+    e.stopPropagation();
+    if (confermato || !offerta.id) return;
+    setConfermato(true); // ottimismo UI
+
+    try {
+      const { doc, updateDoc, increment } = await import('firebase/firestore');
+      const { db } = await import('./firebase');
+      await updateDoc(doc(db, 'offerte_attive', offerta.id), {
+        conferme: increment(1),
+      });
+    } catch { setConfermato(false); }
+  };
+
+  // Metatdati fonte — quanto è fresco e affidabile il dato
+  const conferme = offerta.conferme || 0;
+  const segnalazioniN = offerta.segnalazioni || 0;
+  const ggFa = offerta.data_scansione
+    ? Math.floor((Date.now() - new Date(offerta.data_scansione).getTime()) / 86400000)
+    : null;
+  const isFotoUtente = offerta.fonte === 'foto_utente';
+  const haAllarme = segnalazioniN >= 1 || (isFotoUtente && conferme < 2);
+
   return (
     <div
-      className="flex items-center gap-3 px-4 py-3 active:bg-stone-50 transition-colors"
-      style={{
-        borderBottom: `1px solid ${T.border}`,
-        animationDelay: `${index * 30}ms`,
-      }}
+      className="px-4 py-3 transition-colors"
+      style={{ borderBottom: `1px solid ${T.border}`, animationDelay: `${index * 30}ms` }}
     >
-      {/* Prezzo — colonna sinistra prominente */}
-      <div className="shrink-0 text-right w-16">
-        <div className="font-semibold leading-tight" style={{ fontFamily: "'Lora', serif", fontSize: '18px', color: T.textPrimary }}>
-          {formattaPrezzo(offerta.prezzo)}
-        </div>
-        {offerta.prezzo_kg && (
-          <div className="text-[10px] leading-tight mt-0.5" style={{ color: T.textSec }}>
-            {formattaPrezzo(offerta.prezzo_kg)}/kg
+      {/* Riga principale: prezzo + nome + scadenza */}
+      <div className="flex items-center gap-3">
+        {/* Prezzo */}
+        <div className="shrink-0 text-right w-16">
+          <div className="font-semibold leading-tight" style={{ fontFamily: "'Lora', serif", fontSize: '18px', color: T.textPrimary }}>
+            {formattaPrezzo(offerta.prezzo)}
           </div>
-        )}
-      </div>
-
-      {/* Contenuto centrale */}
-      <div className="flex-1 min-w-0">
-        <p className="font-medium leading-snug truncate" style={{ color: T.textPrimary, fontSize: '14px' }}>
-          {offerta.nome}
-          {offerta.marca && <span className="font-normal" style={{ color: T.textSec }}> · {offerta.marca}</span>}
-        </p>
-        <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${getBadgeInsegna(offerta.insegna)}`}>
-            {offerta.insegna}
-          </span>
-          {offerta.grammatura && (
-            <span className="text-[11px]" style={{ color: T.textSec }}>{offerta.grammatura}</span>
+          {offerta.prezzo_kg && (
+            <div className="text-[10px] leading-tight mt-0.5" style={{ color: T.textSec }}>
+              {formattaPrezzo(offerta.prezzo_kg)}/kg
+            </div>
           )}
-          {offerta.fidelity_req && (
-            <Star size={10} className="fill-blue-500 text-blue-500" strokeWidth={0} />
+        </div>
+
+        {/* Contenuto centrale */}
+        <div className="flex-1 min-w-0">
+          <p className="font-medium leading-snug truncate" style={{ color: T.textPrimary, fontSize: '14px' }}>
+            {offerta.nome}
+            {offerta.marca && <span className="font-normal" style={{ color: T.textSec }}> · {offerta.marca}</span>}
+          </p>
+          <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+            <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-md ${getBadgeInsegna(offerta.insegna)}`}>
+              {offerta.insegna}
+            </span>
+            {offerta.grammatura && (
+              <span className="text-[11px]" style={{ color: T.textSec }}>{offerta.grammatura}</span>
+            )}
+            {offerta.fidelity_req && (
+              <Star size={10} className="fill-blue-500 text-blue-500" strokeWidth={0} />
+            )}
+          </div>
+        </div>
+
+        {/* Destra: scadenza + segnala */}
+        <div className="shrink-0 flex flex-col items-end gap-1">
+          {isUrgente ? (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+              style={{ background: isScadenzaOggi ? '#FFF0E8' : '#FFFBEB', color: isScadenzaOggi ? T.accent : '#92400E' }}>
+              {isScadenzaOggi ? 'Oggi' : isScadenzaDomani ? 'Domani' : `${giorni}gg`}
+            </span>
+          ) : giorni >= 0 && (
+            <span className="text-[10px]" style={{ color: T.textSec }}>{giorni}gg</span>
+          )}
+          {segnalati && segnala && offerta.id && (
+            <BottoneSegnala docId={offerta.id} collectionName="offerte_attive"
+              segnalati={segnalati} segnala={segnala} />
           )}
         </div>
       </div>
 
-      {/* Scadenza — colonna destra */}
-      <div className="shrink-0 text-right">
-        {isUrgente ? (
-          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-            style={{ background: isScadenzaOggi ? '#FFF0E8' : '#FFFBEB', color: isScadenzaOggi ? T.accent : '#92400E' }}>
-            {isScadenzaOggi ? 'Oggi' : isScadenzaDomani ? 'Domani' : `${giorni}gg`}
-          </span>
-        ) : (
-          <span className="text-[10px]" style={{ color: T.textSec }}>
-            {giorni >= 0 ? `${giorni}gg` : ''}
-          </span>
-        )}
-      </div>
+      {/* Trust bar — solo per offerte da foto utente o con segnalazioni */}
+      {(isFotoUtente || segnalazioniN > 0 || conferme > 0) && (
+        <div className="mt-2 flex items-center justify-between">
+          {/* Sinistra: source + conferme */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {isFotoUtente && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md font-medium"
+                style={{ background: '#EEF2E4', color: T.primary }}>
+                📸 Foto community
+              </span>
+            )}
+            {conferme > 0 && (
+              <span className="text-[10px]" style={{ color: T.textSec }}>
+                {conferme} {conferme === 1 ? 'conferma' : 'conferme'}
+              </span>
+            )}
+            {ggFa !== null && (
+              <span className="text-[10px]" style={{ color: T.textSec }}>
+                · {ggFa === 0 ? 'oggi' : `${ggFa}gg fa`}
+              </span>
+            )}
+            {segnalazioniN > 0 && (
+              <span className="text-[10px] font-medium" style={{ color: T.accent }}>
+                ⚠️ {segnalazioniN} segnalaz.
+              </span>
+            )}
+          </div>
+
+          {/* Destra: bottone "Confermo" */}
+          {offerta.id && !confermato && (
+            <button
+              onClick={confermaVisto}
+              className="text-[10px] px-2 py-0.5 rounded-full font-medium transition-all active:scale-95"
+              style={{ border: `1px solid ${T.border}`, color: T.textSec, background: T.surface }}>
+              ✓ Confermo
+            </button>
+          )}
+          {confermato && (
+            <span className="text-[10px] font-medium" style={{ color: T.primary }}>✓ Confermato</span>
+          )}
+        </div>
+      )}
+
+      {/* Disclaimer — solo offerte non ancora confermate da community */}
+      {isFotoUtente && conferme < 3 && (
+        <p className="text-[10px] mt-1.5 leading-tight" style={{ color: T.textSec }}>
+          Verifica sempre il prezzo al momento dell'acquisto
+        </p>
+      )}
     </div>
   );
 };
@@ -1517,15 +1793,20 @@ const CATEGORIE_EMOJI = {
 const TabOfferte = ({ offerte, archivio = [] }) => {
   const [vista, setVista] = useState('highlights');
   const [searchQuery, setSearchQuery] = useState('');
-  const [categoriaAttiva, setCategoriaAttiva] = useState(null); // null = mostra tutte in sfoglia
+  const [categoriaAttiva, setCategoriaAttiva] = useState(null);
   const [ordinamento, setOrdinamento] = useState('prezzo_asc');
   const [showOrdinamento, setShowOrdinamento] = useState(false);
   const oggi = getOggi();
 
-  // ── Deduplicazione base (stesso nome+marca+insegna → prezzo minore) ──────
+  // ── Store segnalazioni — un'unica istanza per tutto il tab ───────────────
+  const { segnalati, segnala } = useSegnalazioniStore();
+
+  // ── Deduplicazione + filtro nascosto ─────────────────────────────────────
+  // Le offerte con nascosto:true (>= 3 segnalazioni) spariscono dalla vista
   const offerteDedup = useMemo(() => {
     const seen = new Map();
     offerte.forEach(o => {
+      if (o.nascosto) return; // escludi offerte segnalate dalla community
       const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
       if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
     });
@@ -1752,7 +2033,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
               <div className="px-4 rounded-[20px] overflow-hidden mx-4"
                 style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
                 {highlights.topCategorie.map((o, i) => (
-                  <ProductCardCompatta key={o.id || i} offerta={o} index={i} />
+                  <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
                 ))}
               </div>
             </div>
@@ -1772,7 +2053,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
                 <div className="px-4 rounded-[20px] overflow-hidden mx-4"
                   style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
                   {highlights.conTessera.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
                   ))}
                 </div>
               </div>
@@ -1826,7 +2107,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
                 <div className="rounded-[0px] overflow-hidden"
                   style={{ background: T.surface }}>
                   {offerteSfoglia.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
                   ))}
                 </div>
               </div>
@@ -1857,7 +2138,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
                 </p>
                 <div style={{ background: T.surface }}>
                   {offerteRicerca.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
                   ))}
                 </div>
               </div>
@@ -1871,93 +2152,121 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
 
 // ─── Tab Lista Spesa ──────────────────────────────────────────────────────────
 
+// Normalizza una stringa di lista per confronto/deduplicazione
+const normalizzaLista = (items) =>
+  [...items].map(i => i.toLowerCase().trim()).sort().join('|');
+
 const TabListaSpesa = ({ offerte, archivio = [] }) => {
   const { isLoggedIn, listaSpesa, aggiornaListaSpesa, preferenze, prodottiPreferiti } = useAuth();
 
-  // Lista come testo — sincronizzata con Firestore se loggato, localStorage se no
   const [listaText, setListaText] = useState(() => {
-    try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; } catch { return "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; }
+    try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; } catch { return ""; }
   });
   const [risultato, setRisultato] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [showStorico, setShowStorico] = useState(false);
+  const [vistaStorico, setVistaStorico] = useState(false); // toggle pannello storico
+
+  // Storico strutturato: { id, items[], vincitore, totale, usata, ultimaData }
   const [storicoListe, setStoricoListe] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('lenticchia_storico') || '[]'); } catch { return []; }
+    try { return JSON.parse(localStorage.getItem('lenticchia_storico_v2') || '[]'); } catch { return []; }
   });
 
-  // Sincronizza lista da cloud SOLO al primo caricamento
-  // Non reagire ai cambiamenti successivi — causerebbero sovrascrittura
-  // mentre l'utente sta scrivendo
+  // Sync lista da cloud al primo caricamento
   const [listaCaricata, setListaCaricata] = useState(false);
   useEffect(() => {
     if (isLoggedIn && listaSpesa?.items?.length && !listaCaricata) {
-      const testoCloud = listaSpesa.items.join('\n');
-      setListaText(testoCloud);
+      setListaText(listaSpesa.items.join('\n'));
       setListaCaricata(true);
     }
   }, [listaSpesa, isLoggedIn, listaCaricata]);
 
   const handleListaChange = (nuovoTesto) => {
     setListaText(nuovoTesto);
-    // Salva su localStorage sempre (fallback offline)
     try { localStorage.setItem('lenticchia_lista', nuovoTesto); } catch {}
-    // Salva su Firestore se loggato (con debounce interno all'AuthContext)
     if (isLoggedIn) {
       const items = nuovoTesto.split('\n').map(i => i.trim()).filter(Boolean);
       aggiornaListaSpesa(items);
     }
   };
 
-  const salvaInStorico = (lista, vincitore, totale) => {
-    const nuova = { data: new Date().toLocaleDateString('it-IT'), lista, vincitore, totale: totale.toFixed(2) };
-    const aggiornato = [nuova, ...storicoListe].slice(0, 10);
-    setStoricoListe(aggiornato);
-    try { localStorage.setItem('lenticchia_storico', JSON.stringify(aggiornato)); } catch {}
+  // Salva in storico v2 — aggrega liste identiche incrementando "usata"
+  const salvaInStorico = (items, vincitore, totale) => {
+    const chiave = normalizzaLista(items);
+    const oggi = new Date().toLocaleDateString('it-IT', { day: '2-digit', month: 'short' });
+
+    setStoricoListe(prev => {
+      const esistente = prev.find(v => normalizzaLista(v.items) === chiave);
+      let aggiornato;
+      if (esistente) {
+        aggiornato = prev.map(v =>
+          normalizzaLista(v.items) === chiave
+            ? { ...v, usata: (v.usata || 1) + 1, ultimaData: oggi, vincitore, totale: totale.toFixed(2) }
+            : v
+        );
+      } else {
+        const nuova = {
+          id: Date.now(),
+          items,
+          vincitore,
+          totale: totale.toFixed(2),
+          usata: 1,
+          ultimaData: oggi,
+          primaData: oggi,
+        };
+        aggiornato = [nuova, ...prev].slice(0, 15);
+      }
+      // Ordina: più usate prima
+      aggiornato.sort((a, b) => (b.usata || 1) - (a.usata || 1));
+      try { localStorage.setItem('lenticchia_storico_v2', JSON.stringify(aggiornato)); } catch {}
+      return aggiornato;
+    });
+  };
+
+  const caricaLista = (voce) => {
+    setListaText(voce.items.join('\n'));
+    handleListaChange(voce.items.join('\n'));
+    setVistaStorico(false);
+    setRisultato(null);
+  };
+
+  const eliminaDallaStorico = (id, e) => {
+    e.stopPropagation();
+    setStoricoListe(prev => {
+      const aggiornato = prev.filter(v => v.id !== id);
+      try { localStorage.setItem('lenticchia_storico_v2', JSON.stringify(aggiornato)); } catch {}
+      return aggiornato;
+    });
   };
 
   const analizzaSpesa = () => {
     setIsAnalyzing(true);
     setTimeout(() => {
-      // Costruisci items: lista spesa + prodotti preferiti con nome_ricerca estesa
       const itemsLista = listaText.split('\n').map(i => i.trim().replace(/\s+/g, ' ').replace(/[^\w\sàèéìòù'.-]/gi, '')).filter(i => i.length > 2);
-      const itemsProdottiPreferiti = (prodottiPreferiti?.items || []).map(p => p.nome_ricerca || p.label);
-      // Unisci senza duplicati
-      const tuttiItems = [...new Set([...itemsLista, ...itemsProdottiPreferiti])];
-      const items = tuttiItems;
+      const itemsPreferirti = (prodottiPreferiti?.items || []).map(p => p.nome_ricerca || p.label);
+      const items = [...new Set([...itemsLista, ...itemsPreferirti])];
 
       if (!items.length) { setRisultato(null); setIsAnalyzing(false); return; }
 
-      // Filtra per insegne attive nelle preferenze utente
-      // Se null (primo accesso prima dell'onboarding) → usa tutte le insegne
       const insegneAttivePref = preferenze?.insegne_attive;
       const tutteLeInsegne = [...new Set(offerte.map(o => o.insegna))];
       const insegne = insegneAttivePref
         ? tutteLeInsegne.filter(i => insegneAttivePref.includes(i))
         : tutteLeInsegne;
+
       const offerteOtt = offerte.map(o => ({ ...o, sN: (o.nome||'').toLowerCase(), sM: (o.marca||'').toLowerCase(), sC: (o.categoria||'').toLowerCase() }));
+
       const storeResults = insegne.map(insegna => {
         const storeOffers = offerteOtt.filter(o => o.insegna === insegna);
         let trovati = [], nonTrovati = [], totalePrezzo = 0;
         items.forEach(itemStr => {
           const parole = itemStr.toLowerCase().split(' ').filter(p => p.length > 1);
-
-          // Word boundary regex — evita che "latte" trovi "Valcolatte"
-          // o "caffè" trovi prodotti che contengono "caffe" come sottostringa
           const matchaParola = (testo, parola) => {
-            // Escape caratteri speciali regex
             const escaped = parola.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // \b non funziona con caratteri accentati italiani (à,è,ì,ò,ù)
-            // usiamo lookahead/lookbehind su spazio o inizio/fine stringa
             const re = new RegExp(`(^|[\\s,./\\-])${escaped}([\\s,./\\-]|$)`, 'i');
-            return re.test(' ' + testo + ' '); // padding per gestire inizio/fine
+            return re.test(' ' + testo + ' ');
           };
-
           const goodMatches = storeOffers.filter(o =>
-            parole.every(p =>
-              matchaParola(o.sN, p) ||   // nome — match esatto per parola
-              matchaParola(o.sM, p) ||   // marca — match esatto per parola
-              o.sC.includes(p)           // categoria — includes ok (parole brevi tipo "carne")
-            )
+            parole.every(p => matchaParola(o.sN, p) || matchaParola(o.sM, p) || o.sC.includes(p))
           );
           if (goodMatches.length > 0) {
             goodMatches.sort((a, b) => a.prezzo - b.prezzo);
@@ -1969,7 +2278,9 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
         const extraOfferte = storeOffers.filter(o => !idsTrovati.includes(o.id)).sort((a, b) => a.prezzo - b.prezzo).slice(0, 3);
         return { insegna, trovati, nonTrovati, totalePrezzo, extraOfferte, punteggio: trovati.length };
       });
+
       storeResults.sort((a, b) => b.punteggio !== a.punteggio ? b.punteggio - a.punteggio : a.totalePrezzo - b.totalePrezzo);
+
       if (storeResults.length > 0 && storeResults[0].punteggio > 0) {
         const vincitore = storeResults[0];
         setRisultato({ vincitore, alternative: storeResults.slice(1).filter(r => r.punteggio > 0).slice(0, 3) });
@@ -1981,88 +2292,188 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
     }, 600);
   };
 
-  return (
-    <div className="flex flex-col h-full pb-28 overflow-y-auto" style={{ background: T.bg }}>
-      {/* Header */}
-      <div className="px-5 pt-8 pb-6" style={{ background: T.primary }}>
-        <h2 style={{ fontFamily: "'Lora', serif", fontSize: '26px', fontWeight: 500, color: '#fff', marginBottom: '4px' }}>
-          Verdetto Spesa
-        </h2>
-        <p className="text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>Dove conviene fare la spesa questa settimana.</p>
-      </div>
+  const itemsAttuali = listaText.split('\n').map(i => i.trim()).filter(Boolean);
+  const chiaveAttuale = normalizzaLista(itemsAttuali);
 
-      <div className="px-4 -mt-4 relative z-10">
-        {/* Card input */}
-        <div className="rounded-[20px] p-5 mb-4" style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
-          <label className="block text-xs uppercase tracking-wider font-medium mb-2" style={{ color: T.textSec }}>
-            Cosa ti serve? (una voce per riga)
-          </label>
-          {/* Tip ricerca */}
-          <div className="rounded-xl px-3 py-2.5 mb-3 flex items-start gap-2"
-            style={{ background: '#EEF2E4', border: `1px solid #C8D9A0` }}>
-            <span style={{ color: T.primary, fontSize: '15px', lineHeight: 1, marginTop: '1px' }}>🌿</span>
-            <p className="text-xs leading-relaxed" style={{ color: T.primary }}>
-              Più sei specifico, migliori i risultati. Scrivi <strong>"latte parzialmente scremato"</strong> invece di solo "latte", <strong>"pasta fusilli"</strong> invece di "pasta".
+  return (
+    <div className="flex flex-col h-full overflow-y-auto hide-scrollbar pb-32" style={{ background: T.bg }}>
+
+      {/* ── Header ── */}
+      <div className="px-5 pt-8 pb-5" style={{ background: T.primary }}>
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 style={{ fontFamily: "'Lora', serif", fontSize: '26px', fontWeight: 500, color: '#fff', marginBottom: '2px' }}>
+              La mia spesa
+            </h2>
+            <p className="text-sm" style={{ color: 'rgba(255,255,255,0.7)' }}>
+              Dove conviene fare la spesa questa settimana
             </p>
           </div>
-          <textarea
-            className="w-full p-4 rounded-2xl text-sm resize-none outline-none transition-all"
-            style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif", minHeight: '140px' }}
-            value={listaText}
-            onChange={(e) => handleListaChange(e.target.value)}
-            placeholder={"pane\nlatte\nuova\n..."}
-          />
-          <div className="flex gap-2 mt-4">
-            <button
-              onClick={analizzaSpesa}
-              disabled={isAnalyzing || !listaText.trim()}
-              className="flex-1 text-white font-medium py-3.5 px-4 rounded-[20px] transition-all disabled:opacity-50 flex justify-center items-center gap-2 active:scale-[0.98]"
-              style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: `0 8px 20px rgba(44,48,38,0.2)` }}
-            >
-              {isAnalyzing ? <span className="animate-pulse">Cerco...</span> : <><Search size={16} strokeWidth={1.5} /> Trova il migliore</>}
-            </button>
-            {storicoListe.length > 0 && (
-              <button onClick={() => setShowStorico(v => !v)}
-                className="px-3.5 py-3 rounded-[20px] border transition-all"
-                style={showStorico ? { background: '#EEF2E4', borderColor: '#C8D9A0', color: T.primary } : { background: T.surface, borderColor: T.border, color: T.textSec }}>
-                <History size={18} strokeWidth={1.5} />
-              </button>
-            )}
-          </div>
+          {/* Bottone storico */}
+          <button
+            onClick={() => { setVistaStorico(v => !v); setRisultato(null); }}
+            className="flex flex-col items-center gap-0.5 mt-1"
+            style={{ color: vistaStorico ? '#fff' : 'rgba(255,255,255,0.55)' }}
+          >
+            <History size={22} strokeWidth={1.5} />
+            <span style={{ fontSize: '10px', fontWeight: 500 }}>Storico</span>
+          </button>
         </div>
+      </div>
 
-        {/* Storico */}
-        {showStorico && storicoListe.length > 0 && (
-          <div className="rounded-[20px] p-4 mb-4" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
-            <h3 className="text-xs uppercase tracking-wider font-medium mb-3 flex items-center gap-2" style={{ color: T.textSec }}>
-              <History size={13} strokeWidth={1.5} /> Ultime liste
-            </h3>
-            <div className="space-y-2">
-              {storicoListe.map((voce, idx) => (
-                <div key={idx} className="flex items-center justify-between p-3 rounded-xl cursor-pointer active:scale-[0.99] transition-all"
-                  style={{ background: T.bg }} onClick={() => { setListaText(voce.lista.join('\n')); setShowStorico(false); }}>
-                  <div>
-                    <div className="text-xs mb-0.5" style={{ color: T.textSec }}>{voce.data}</div>
-                    <div className="text-sm font-medium" style={{ color: T.textPrimary }}>
-                      {voce.lista.slice(0, 3).join(', ')}{voce.lista.length > 3 ? '...' : ''}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-xs font-bold" style={{ color: T.primary }}>{voce.vincitore}</div>
-                    <div className="text-xs" style={{ color: T.textSec }}>€{voce.totale}</div>
-                  </div>
-                </div>
-              ))}
+      <div className="px-4 -mt-4 relative z-10 space-y-4">
+
+        {/* ══ VISTA STORICO ══ */}
+        {vistaStorico && (
+          <div className="rounded-[20px] overflow-hidden animate-fade-in-up"
+            style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 8px 30px rgba(44,48,38,0.08)' }}>
+
+            <div className="px-5 pt-5 pb-3 flex items-center justify-between"
+              style={{ borderBottom: `1px solid ${T.border}` }}>
+              <div>
+                <h3 className="font-medium text-sm" style={{ color: T.textPrimary }}>Liste frequenti</h3>
+                <p className="text-xs mt-0.5" style={{ color: T.textSec }}>Tocca per ricaricarla nel campo</p>
+              </div>
+              {storicoListe.length > 0 && (
+                <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                  style={{ background: '#EEF2E4', color: T.primary }}>
+                  {storicoListe.length} salvate
+                </span>
+              )}
             </div>
+
+            {storicoListe.length === 0 ? (
+              <div className="px-5 py-10 text-center">
+                <History size={28} strokeWidth={1} className="mx-auto mb-3" style={{ color: T.border }} />
+                <p className="text-sm font-medium" style={{ color: T.textPrimary }}>Ancora nessuna lista</p>
+                <p className="text-xs mt-1" style={{ color: T.textSec }}>
+                  Ogni volta che usi "Cerca offerte", la lista viene salvata qui.
+                </p>
+              </div>
+            ) : (
+              <div>
+                {storicoListe.map((voce, idx) => {
+                  const isAttuale = normalizzaLista(voce.items) === chiaveAttuale;
+                  const frequenzaLabel = voce.usata >= 4 ? '🔁 Abituale' : voce.usata >= 2 ? '↩ Ripetuta' : null;
+                  return (
+                    <div key={voce.id}
+                      onClick={() => caricaLista(voce)}
+                      className="flex items-center gap-3 px-5 py-4 cursor-pointer active:bg-stone-50 transition-colors"
+                      style={{ borderTop: idx > 0 ? `1px solid ${T.border}` : 'none' }}>
+
+                      {/* Icona frequenza */}
+                      <div className="w-9 h-9 rounded-xl shrink-0 flex items-center justify-center text-sm font-bold"
+                        style={{ background: isAttuale ? T.primary : '#EEF2E4', color: isAttuale ? '#fff' : T.primary }}>
+                        {voce.usata >= 4 ? '🔁' : voce.usata >= 2 ? voce.usata : '1'}
+                      </div>
+
+                      {/* Contenuto */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <p className="text-sm font-medium truncate" style={{ color: T.textPrimary }}>
+                            {voce.items.slice(0, 3).join(', ')}{voce.items.length > 3 ? ` +${voce.items.length - 3}` : ''}
+                          </p>
+                          {frequenzaLabel && (
+                            <span className="text-[10px] font-semibold shrink-0 px-1.5 py-0.5 rounded-md"
+                              style={{ background: '#EEF2E4', color: T.primary }}>
+                              {frequenzaLabel}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-xs" style={{ color: T.textSec }}>
+                          <span>{voce.items.length} prodotti</span>
+                          <span>·</span>
+                          <span className="font-medium" style={{ color: T.primary }}>{voce.vincitore}</span>
+                          <span>·</span>
+                          <span>€{voce.totale}</span>
+                          <span>·</span>
+                          <span>{voce.ultimaData}</span>
+                        </div>
+                      </div>
+
+                      {/* Elimina */}
+                      <button
+                        onClick={(e) => eliminaDallaStorico(voce.id, e)}
+                        className="p-1.5 rounded-full shrink-0 transition-colors hover:bg-red-50"
+                        style={{ color: T.border }}>
+                        <X size={14} strokeWidth={2} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Risultato */}
-        {risultato && (
+        {/* ══ CARD INPUT ══ */}
+        {!vistaStorico && (
+          <div className="rounded-[20px] p-5 animate-fade-in-up"
+            style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
+
+            <label className="block text-xs uppercase tracking-wider font-medium mb-2" style={{ color: T.textSec }}>
+              Cosa ti serve? (una voce per riga)
+            </label>
+
+            {/* Tip */}
+            <div className="rounded-xl px-3 py-2.5 mb-3 flex items-start gap-2"
+              style={{ background: '#EEF2E4', border: `1px solid #C8D9A0` }}>
+              <span style={{ color: T.primary, fontSize: '15px', lineHeight: 1, marginTop: '1px' }}>🌿</span>
+              <p className="text-xs leading-relaxed" style={{ color: T.primary }}>
+                Più sei specifico, migliori i risultati. Scrivi <strong>"latte parzialmente scremato"</strong> invece di "latte", <strong>"pasta fusilli"</strong> invece di "pasta".
+              </p>
+            </div>
+
+            <textarea
+              className="w-full p-4 rounded-2xl text-sm resize-none outline-none"
+              style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif", minHeight: '140px' }}
+              value={listaText}
+              onChange={(e) => handleListaChange(e.target.value)}
+              placeholder={"pane\nlatte\nuova\n..."}
+            />
+
+            {/* Suggerimento lista frequente — se c'è una lista simile nello storico */}
+            {(() => {
+              if (!listaText.trim() && storicoListe.length > 0) {
+                const top = storicoListe[0]; // già ordinato per frequenza
+                return (
+                  <div className="mt-3 flex items-center gap-2 p-3 rounded-2xl cursor-pointer active:scale-[0.99] transition-all"
+                    style={{ background: '#EEF2E4', border: `1px solid #C8D9A0` }}
+                    onClick={() => caricaLista(top)}>
+                    <span style={{ fontSize: '16px' }}>🔁</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold" style={{ color: T.primary }}>Riusa la lista più frequente</p>
+                      <p className="text-xs truncate mt-0.5" style={{ color: T.textSec }}>
+                        {top.items.slice(0, 4).join(', ')}{top.items.length > 4 ? '...' : ''}
+                      </p>
+                    </div>
+                    <span className="text-xs font-medium shrink-0" style={{ color: T.primary }}>{top.usata}×</span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
+            <button
+              onClick={analizzaSpesa}
+              disabled={isAnalyzing || !listaText.trim()}
+              className="w-full mt-4 text-white font-medium py-3.5 px-4 rounded-[20px] transition-all disabled:opacity-50 flex justify-center items-center gap-2 active:scale-[0.98]"
+              style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: `0 8px 20px rgba(44,48,38,0.2)` }}
+            >
+              {isAnalyzing
+                ? <span className="animate-pulse">Cerco...</span>
+                : <><Search size={16} strokeWidth={1.5} /> Cerca offerte</>
+              }
+            </button>
+          </div>
+        )}
+
+        {/* ══ RISULTATO ══ */}
+        {risultato && !vistaStorico && (
           <div className="animate-fade-in-up">
             {risultato.vincitore?.trovati.length > 0 ? (
               <>
-                {/* Verdetto vincitore con prodotti trovati inline */}
+                {/* Card vincitore */}
                 <div className="rounded-[24px] p-6 mb-4 relative overflow-hidden animate-spring"
                   style={{ background: T.primary, boxShadow: `0 12px 40px rgba(100,113,68,0.3)` }}>
                   <div className="absolute top-0 right-0 px-3 py-1.5 text-xs font-bold uppercase tracking-wider rounded-bl-2xl"
@@ -2074,7 +2485,6 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                     {risultato.vincitore.insegna}
                   </h2>
 
-                  {/* Prodotti trovati — inline nella card verde */}
                   <div className="space-y-2 mb-4">
                     {risultato.vincitore.trovati.map((t, idx) => (
                       <div key={idx} className="flex justify-between items-center px-3 py-2.5 rounded-2xl"
@@ -2095,7 +2505,6 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                     ))}
                   </div>
 
-                  {/* Non trovati — inline più discreti */}
                   {risultato.vincitore.nonTrovati.length > 0 && (
                     <div className="mb-4 px-3 py-2.5 rounded-2xl" style={{ background: 'rgba(0,0,0,0.15)' }}>
                       <p className="text-xs mb-1.5" style={{ color: 'rgba(255,255,255,0.6)' }}>
@@ -2107,7 +2516,6 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                     </div>
                   )}
 
-                  {/* Totale */}
                   <div className="rounded-2xl p-3 flex justify-between items-center" style={{ background: 'rgba(255,255,255,0.15)' }}>
                     <span className="text-sm" style={{ color: 'rgba(255,255,255,0.85)' }}>Totale offerte trovate</span>
                     <span style={{ fontFamily: "'Lora', serif", fontSize: '24px', fontWeight: 500, color: '#fff' }}>
@@ -2116,7 +2524,6 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                   </div>
                 </div>
 
-                {/* Alternative */}
                 {risultato.alternative.length > 0 && (
                   <div className="mb-4">
                     <h4 className="text-xs uppercase tracking-wider font-medium mb-3 flex items-center gap-2" style={{ color: T.textSec }}>
@@ -2143,8 +2550,6 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                     </div>
                   </div>
                 )}
-
-
               </>
             ) : (
               <div className="rounded-[20px] p-6 text-center" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
@@ -2208,9 +2613,10 @@ const TabStato = ({ statoVolantini }) => (
 
 const TabSupermercati = ({ offerte, statoVolantini }) => {
   const [selectedInsegna, setSelectedInsegna] = useState(null);
+  const { segnalati, segnala } = useSegnalazioniStore();
 
   if (selectedInsegna) {
-    const storeOffers = offerte.filter(o => o.insegna === selectedInsegna).sort((a, b) => a.prezzo - b.prezzo);
+    const storeOffers = offerte.filter(o => o.insegna === selectedInsegna && !o.nascosto).sort((a, b) => a.prezzo - b.prezzo);
     const tileClass = getTileInsegna(selectedInsegna);
     return (
       <div className="flex flex-col h-full pb-28" style={{ background: T.bg }}>
@@ -2224,7 +2630,7 @@ const TabSupermercati = ({ offerte, statoVolantini }) => {
           </div>
         </div>
         <div className="p-4 overflow-y-auto flex-1">
-          {storeOffers.map((o, i) => <ProductCard key={o.id} offerta={o} index={i} />)}
+          {storeOffers.map((o, i) => <ProductCard key={o.id} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />)}
         </div>
       </div>
     );
@@ -2628,6 +3034,409 @@ const TabSpese = ({ scontriniReali = [] }) => {
   );
 };
 
+// ─── Tab Validazione Scontrini (HITL Fase 2) ─────────────────────────────────
+// Mostrata quando l'utente ha scontrini in stato "da_validare".
+// L'utente può correggere i dati estratti da Claude e confermare.
+// Solo al click su Conferma vengono creati prezzi_scontrini e assegnati i punti.
+
+const PUNTI_BASE_SCONTRINO   = 15;
+const PUNTI_BONUS_PRODOTTI   = 5;   // se > 10 prodotti
+const PUNTI_BONUS_SETTIMANA  = 5;   // primo scontrino della settimana
+
+const calcolaLivello = (p = 0) => {
+  if (p >= 1000) return 'Guru';
+  if (p >= 400)  return 'Stratega';
+  if (p >= 150)  return 'Cacciatore';
+  if (p >= 50)   return 'Esploratore';
+  return 'Osservatore';
+};
+
+const TabValidazioneScontrini = ({ scontriniDaValidare, onValidatoOk }) => {
+  const { utente } = useAuth();
+
+  // Quale scontrino stiamo revisionando (indice)
+  const [indice, setIndice]             = useState(0);
+  // Copia modificabile dell'estratto
+  const [estratto, setEstratto]         = useState(null);
+  // Stato per ogni scontrino: idle | salvando | salvato | errore
+  const [stato, setStato]               = useState('idle');
+  const [puntiAnimati, setPuntiAnimati] = useState(0);
+  const [prodottoInEdit, setProdottoInEdit] = useState(null); // indice prodotto in editing
+
+  const scontrino = scontriniDaValidare[indice];
+
+  // Quando cambia lo scontrino corrente, carica la sua estrazione
+  useEffect(() => {
+    if (scontrino?.estratto) {
+      // Deep copy per permettere modifiche senza mutare l'originale
+      setEstratto(JSON.parse(JSON.stringify(scontrino.estratto)));
+      setStato('idle');
+      setProdottoInEdit(null);
+    }
+  }, [indice, scontrino]);
+
+  if (!scontrino || !estratto) return null;
+
+  const aggiornaCampoTestata = (campo, valore) => {
+    setEstratto(prev => ({ ...prev, [campo]: valore }));
+  };
+
+  const aggiornaProdotto = (idx, campo, valore) => {
+    setEstratto(prev => {
+      const nuovi = [...prev.prodotti];
+      nuovi[idx] = { ...nuovi[idx], [campo]: campo === 'prezzo_unitario' || campo === 'quantita' ? parseFloat(valore) || 0 : valore };
+      return { ...prev, prodotti: nuovi };
+    });
+  };
+
+  const rimuoviProdotto = (idx) => {
+    setEstratto(prev => ({ ...prev, prodotti: prev.prodotti.filter((_, i) => i !== idx) }));
+  };
+
+  const confermaScontrino = async () => {
+    if (stato === 'salvando') return;
+    setStato('salvando');
+
+    try {
+      const { addDoc, updateDoc, doc, collection, serverTimestamp, increment } = await import('firebase/firestore');
+      const { db } = await import('./firebase');
+
+      const prodotti = estratto.prodotti || [];
+      const n = prodotti.length;
+
+      // ── FASE 2a: crea documento in prezzi_scontrini ───────────
+      await addDoc(collection(db, 'prezzi_scontrini'), {
+        uid:               utente.uid,
+        insegna:           estratto.insegna || '',
+        insegna_normalizzata: (estratto.insegna || '').toLowerCase().trim(),
+        indirizzo:         estratto.indirizzo || '',
+        data_acquisto:     estratto.data_acquisto || '',
+        totale_scontrino:  estratto.totale || 0,
+        prodotti:          prodotti,
+        n_prodotti:        n,
+        stato:             'verificato',
+        validato_dall_utente: true,
+        data_caricamento:  serverTimestamp(),
+        coda_doc_id:       scontrino.id,
+      });
+
+      // ── FASE 2b: calcola punti ────────────────────────────────
+      let punti = PUNTI_BASE_SCONTRINO;
+      if (n > 10) punti += PUNTI_BONUS_PRODOTTI;
+      // Il bonus prima settimana lo verifichiamo lato client
+      // (semplificazione — per max rigore usare Cloud Function)
+      const oggiStr = new Date().toISOString().split('T')[0];
+      const lunediStr = (() => {
+        const d = new Date(); d.setDate(d.getDate() - d.getDay() + 1);
+        return d.toISOString().split('T')[0];
+      })();
+      // Se non ci sono altri scontrini questa settimana nel tab Spese → bonus
+      // (approssimazione: controllo fatto prima del salvataggio quindi 0 = primo)
+      punti += PUNTI_BONUS_SETTIMANA; // semplificato — in prod usare Cloud Function
+
+      // ── FASE 2c: aggiorna coda_scontrini → elaborato ─────────
+      await updateDoc(doc(db, 'coda_scontrini', scontrino.id), {
+        stato:             'elaborato',
+        punti_assegnati:   punti,
+        n_prodotti_validati: n,
+        validato_il:       serverTimestamp(),
+        // Non cancelliamo estratto — utile per audit trail
+      });
+
+      // ── FASE 2d: assegna punti al profilo ────────────────────
+      const profiloRef = doc(db, 'users', utente.uid, 'private', 'profilo');
+      // Usiamo increment atomico per evitare race condition
+      const { getDoc } = await import('firebase/firestore');
+      const profiloSnap = await getDoc(profiloRef);
+      if (profiloSnap.exists()) {
+        const puntiAttuali = profiloSnap.data().punti || 0;
+        const nuoviPunti   = puntiAttuali + punti;
+        await updateDoc(profiloRef, {
+          punti:            nuoviPunti,
+          livello:          calcolaLivello(nuoviPunti),
+          scontrini_totali: increment(1),
+        });
+      }
+
+      setPuntiAnimati(punti);
+      setStato('salvato');
+      setTimeout(() => {
+        onValidatoOk(scontrino.id);
+        // Passa al prossimo se ce ne sono altri
+        if (indice < scontriniDaValidare.length - 1) {
+          setIndice(prev => prev + 1);
+        }
+        setStato('idle');
+        setPuntiAnimati(0);
+      }, 2500);
+
+    } catch (err) {
+      console.error('Errore conferma scontrino:', err);
+      setStato('errore');
+    }
+  };
+
+  const rifiutaScontrino = async () => {
+    try {
+      const { updateDoc, doc, serverTimestamp } = await import('firebase/firestore');
+      const { db } = await import('./firebase');
+      await updateDoc(doc(db, 'coda_scontrini', scontrino.id), {
+        stato: 'rifiutato',
+        rifiutato_il: serverTimestamp(),
+      });
+      onValidatoOk(scontrino.id);
+      if (indice < scontriniDaValidare.length - 1) setIndice(prev => prev + 1);
+    } catch (err) {
+      console.error('Errore rifiuto:', err);
+    }
+  };
+
+  const totaleCalcolato = (estratto.prodotti || []).reduce(
+    (acc, p) => acc + ((p.prezzo_unitario || 0) * (p.quantita || 1)), 0
+  );
+
+  return (
+    <div className="flex flex-col h-full overflow-y-auto hide-scrollbar pb-32" style={{ background: T.bg }}>
+
+      {/* Header */}
+      <div className="px-5 pt-8 pb-5" style={{ background: T.primary }}>
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2.5">
+            <ClipboardCheck size={20} strokeWidth={1.5} className="text-white" />
+            <h2 style={{ fontFamily: "'Lora', serif", fontSize: '22px', fontWeight: 500, color: '#fff' }}>
+              Verifica scontrino
+            </h2>
+          </div>
+          {scontriniDaValidare.length > 1 && (
+            <span className="text-xs font-medium px-2.5 py-1 rounded-full"
+              style={{ background: 'rgba(255,255,255,0.2)', color: '#fff' }}>
+              {indice + 1} / {scontriniDaValidare.length}
+            </span>
+          )}
+        </div>
+        <p className="text-sm" style={{ color: 'rgba(255,255,255,0.75)' }}>
+          Controlla i dati estratti dall'AI e correggili se necessario
+        </p>
+      </div>
+
+      <div className="px-4 -mt-4 relative z-10 space-y-4">
+
+        {/* ── Stato: salvato con animazione punti ── */}
+        {stato === 'salvato' && (
+          <div className="rounded-[24px] p-8 flex flex-col items-center gap-4 animate-spring"
+            style={{ background: T.primary, boxShadow: '0 12px 40px rgba(100,113,68,0.3)' }}>
+            <CheckCircle size={48} strokeWidth={1.5} className="text-white" />
+            <div className="text-center">
+              <p style={{ fontFamily: "'Lora', serif", fontSize: '20px', color: '#fff', marginBottom: '6px' }}>
+                Scontrino confermato!
+              </p>
+              <p className="text-sm" style={{ color: 'rgba(255,255,255,0.8)' }}>
+                I dati sono stati salvati
+              </p>
+            </div>
+            <div className="rounded-2xl px-6 py-3 animate-spring"
+              style={{ background: 'rgba(255,255,255,0.2)' }}>
+              <p style={{ fontFamily: "'Lora', serif", fontSize: '28px', fontWeight: 500, color: '#fff', textAlign: 'center' }}>
+                +{puntiAnimati} punti 🌿
+              </p>
+            </div>
+          </div>
+        )}
+
+        {stato !== 'salvato' && (
+          <>
+            {/* ── Card testata scontrino ── */}
+            <div className="rounded-[20px] p-5"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 20px rgba(44,48,38,0.07)' }}>
+              <p className="text-xs uppercase tracking-wider font-medium mb-4" style={{ color: T.textSec }}>
+                Dati scontrino
+              </p>
+              <div className="space-y-3">
+                {[
+                  { label: 'Supermercato', campo: 'insegna', tipo: 'text' },
+                  { label: 'Indirizzo', campo: 'indirizzo', tipo: 'text' },
+                  { label: 'Data acquisto', campo: 'data_acquisto', tipo: 'date' },
+                ].map(({ label, campo, tipo }) => (
+                  <div key={campo}>
+                    <label className="block text-xs font-medium mb-1" style={{ color: T.textSec }}>{label}</label>
+                    <input
+                      type={tipo}
+                      value={estratto[campo] || ''}
+                      onChange={e => aggiornaCampoTestata(campo, e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                      style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
+                    />
+                  </div>
+                ))}
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-xs" style={{ color: T.textSec }}>Totale ricalcolato dai prodotti</span>
+                  <span className="font-semibold" style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
+                    {formattaPrezzo(totaleCalcolato)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Lista prodotti estratti ── */}
+            <div className="rounded-[20px] overflow-hidden"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 20px rgba(44,48,38,0.07)' }}>
+              <div className="px-5 pt-5 pb-3 flex items-center justify-between"
+                style={{ borderBottom: `1px solid ${T.border}` }}>
+                <p className="text-xs uppercase tracking-wider font-medium" style={{ color: T.textSec }}>
+                  Prodotti ({estratto.prodotti?.length || 0})
+                </p>
+                <p className="text-xs" style={{ color: T.textSec }}>
+                  Tocca per correggere
+                </p>
+              </div>
+
+              {(estratto.prodotti || []).map((p, idx) => (
+                <div key={idx} style={{ borderTop: idx > 0 ? `1px solid ${T.border}` : 'none' }}>
+                  {prodottoInEdit === idx ? (
+                    /* Pannello editing inline */
+                    <div className="p-4 space-y-2.5" style={{ background: '#EEF2E4' }}>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] uppercase font-medium mb-1" style={{ color: T.primary }}>Nome</label>
+                          <input
+                            type="text"
+                            value={p.nome_normalizzato || ''}
+                            onChange={e => aggiornaProdotto(idx, 'nome_normalizzato', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg text-xs outline-none"
+                            style={{ background: T.surface, border: `1px solid #C8D9A0`, color: T.textPrimary }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase font-medium mb-1" style={{ color: T.primary }}>Marca</label>
+                          <input
+                            type="text"
+                            value={p.marca || ''}
+                            onChange={e => aggiornaProdotto(idx, 'marca', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg text-xs outline-none"
+                            style={{ background: T.surface, border: `1px solid #C8D9A0`, color: T.textPrimary }}
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10px] uppercase font-medium mb-1" style={{ color: T.primary }}>Prezzo (€)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={p.prezzo_unitario || ''}
+                            onChange={e => aggiornaProdotto(idx, 'prezzo_unitario', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg text-xs outline-none"
+                            style={{ background: T.surface, border: `1px solid #C8D9A0`, color: T.textPrimary }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase font-medium mb-1" style={{ color: T.primary }}>Qtà</label>
+                          <input
+                            type="number"
+                            min="1"
+                            value={p.quantita || 1}
+                            onChange={e => aggiornaProdotto(idx, 'quantita', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg text-xs outline-none"
+                            style={{ background: T.surface, border: `1px solid #C8D9A0`, color: T.textPrimary }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase font-medium mb-1" style={{ color: T.primary }}>Grammatura</label>
+                          <input
+                            type="text"
+                            value={p.grammatura || ''}
+                            onChange={e => aggiornaProdotto(idx, 'grammatura', e.target.value)}
+                            className="w-full px-2.5 py-1.5 rounded-lg text-xs outline-none"
+                            style={{ background: T.surface, border: `1px solid #C8D9A0`, color: T.textPrimary }}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setProdottoInEdit(null)}
+                          className="flex-1 py-2 rounded-xl text-xs font-medium text-white"
+                          style={{ background: T.primary }}>
+                          ✓ Salva
+                        </button>
+                        <button
+                          onClick={() => { rimuoviProdotto(idx); setProdottoInEdit(null); }}
+                          className="px-3 py-2 rounded-xl text-xs"
+                          style={{ background: '#FEE2E2', color: '#DC2626' }}>
+                          Rimuovi
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Riga prodotto compatta */
+                    <div
+                      className="flex items-center px-5 py-3 cursor-pointer active:bg-stone-50 transition-colors"
+                      onClick={() => setProdottoInEdit(idx)}>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm truncate" style={{ color: T.textPrimary }}>
+                          {p.nome_normalizzato || p.nome_raw || '—'}
+                          {p.marca ? <span style={{ color: T.textSec }}> · {p.marca}</span> : null}
+                        </p>
+                        <p className="text-xs mt-0.5" style={{ color: T.textSec }}>
+                          {p.grammatura || ''} {p.quantita > 1 ? `× ${p.quantita}` : ''}
+                          {p.nome_raw && p.nome_raw !== p.nome_normalizzato && (
+                            <span style={{ color: T.textSec }}> · raw: {p.nome_raw}</span>
+                          )}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 ml-3 shrink-0">
+                        <span className="font-semibold text-sm" style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
+                          {formattaPrezzo((p.prezzo_unitario || 0) * (p.quantita || 1))}
+                        </span>
+                        <Pencil size={13} strokeWidth={1.5} style={{ color: T.textSec }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* ── Azioni ── */}
+            {stato === 'errore' && (
+              <div className="rounded-2xl p-4 flex items-center gap-3"
+                style={{ background: '#FEF2F2', border: '1px solid #FECACA' }}>
+                <AlertTriangle size={18} className="text-red-500 shrink-0" strokeWidth={1.5} />
+                <p className="text-sm" style={{ color: '#DC2626' }}>
+                  Errore nel salvataggio. Riprova.
+                </p>
+              </div>
+            )}
+
+            <button
+              onClick={confermaScontrino}
+              disabled={stato === 'salvando'}
+              className="w-full py-4 rounded-[20px] font-medium text-white transition-all active:scale-[0.98] disabled:opacity-60 flex items-center justify-center gap-2"
+              style={{ background: T.primary, fontFamily: "'DM Sans', sans-serif", boxShadow: '0 8px 24px rgba(100,113,68,0.3)' }}>
+              {stato === 'salvando'
+                ? <><Loader size={16} strokeWidth={1.5} className="animate-spin" /> Salvataggio...</>
+                : <><CheckCircle size={16} strokeWidth={1.5} /> Conferma e guadagna +{PUNTI_BASE_SCONTRINO}pt</>
+              }
+            </button>
+
+            <button
+              onClick={rifiutaScontrino}
+              className="w-full py-3 rounded-[20px] text-sm transition-all"
+              style={{ color: T.textSec, border: `1px solid ${T.border}`, background: T.surface }}>
+              Scontrino illeggibile — scarta
+            </button>
+
+            {/* Info legale */}
+            <div className="rounded-2xl p-4" style={{ background: '#EFF6FF', border: '1px solid #BFDBFE' }}>
+              <p className="text-xs leading-relaxed text-blue-800">
+                <strong>Perché devo confermare?</strong> I dati vengono estratti dall'AI ma potrebbero contenere errori OCR. La tua verifica garantisce la qualità del database e protegge la community.
+              </p>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── App principale ───────────────────────────────────────────────────────────
 
 function AppInterna() {
@@ -2638,7 +3447,28 @@ function AppInterna() {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [archivio, setArchivio] = useState([]);
   const [scontriniUtente, setScontriniUtente] = useState([]);
+  const [scontriniDaValidare, setScontriniDaValidare] = useState([]);
   const { utente, profilo, preferenze, loading: authLoading, completaOnboarding, completaOnboardingSupermercati } = useAuth();
+
+  // ─── Carica scontrini da_validare (badge + UI validazione) ──────────────────
+  useEffect(() => {
+    if (!utente) return;
+    const caricaDaValidare = async () => {
+      try {
+        const q = query(
+          collection(db, 'coda_scontrini'),
+          where('uid', '==', utente.uid),
+          where('stato', '==', 'da_validare'),
+          limit(20)
+        );
+        const snap = await getDocs(q);
+        setScontriniDaValidare(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch {
+        setScontriniDaValidare([]);
+      }
+    };
+    caricaDaValidare();
+  }, [utente]);
 
   // ─── Carica scontrini utente (per tab Spese) ──────────────────────────────
   useEffect(() => {
@@ -2793,10 +3623,31 @@ function AppInterna() {
     );
   }
 
+  const nDaValidare = scontriniDaValidare.length;
+
+  // Callback quando l'utente convalida o scarta uno scontrino
+  const onScontrinoValidato = (docId) => {
+    setScontriniDaValidare(prev => prev.filter(s => s.id !== docId));
+  };
+
   const NAV_ITEMS = [
     { id: 'lista',      icon: <ListTodo size={24} strokeWidth={1.5} />, label: 'Spesa' },
     { id: 'offerte',    icon: <Tag size={24} strokeWidth={1.5} />,      label: 'Offerte' },
-    { id: 'scontrino',  icon: <Camera size={24} strokeWidth={1.5} />,   label: 'Scontrino' },
+    {
+      id: 'scontrino',
+      label: 'Scontrino',
+      icon: (
+        <div className="relative">
+          <Camera size={24} strokeWidth={1.5} />
+          {nDaValidare > 0 && (
+            <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
+              style={{ background: T.accent, color: '#fff' }}>
+              {nDaValidare > 9 ? '9+' : nDaValidare}
+            </span>
+          )}
+        </div>
+      )
+    },
     { id: 'spese',      icon: <Wallet size={24} strokeWidth={1.5} />,   label: 'Spese' },
     { id: 'profilo',    icon: utente?.photoURL
         ? <img src={utente.photoURL} alt="avatar" className="w-6 h-6 rounded-full" style={{ border: activeTab === 'profilo' ? `2px solid ${T.primary}` : '2px solid transparent' }} />
@@ -2819,7 +3670,13 @@ function AppInterna() {
         {activeTab === 'negozi'     && <TabSupermercati offerte={offerte} statoVolantini={statoVolantini} />}
         {activeTab === 'lista'      && <TabListaSpesa offerte={offerte} archivio={archivio} />}
         {activeTab === 'stato'      && <TabStato statoVolantini={statoVolantini} />}
-        {activeTab === 'scontrino'  && <TabScontrino />}
+        {activeTab === 'scontrino'  && nDaValidare > 0
+          ? <TabValidazioneScontrini
+              scontriniDaValidare={scontriniDaValidare}
+              onValidatoOk={onScontrinoValidato}
+            />
+          : activeTab === 'scontrino' && <TabScontrino />
+        }
         {activeTab === 'spese'      && <TabSpese scontriniReali={scontriniUtente} />}
         {activeTab === 'profilo'    && <TabProfilo />}
       </div>
