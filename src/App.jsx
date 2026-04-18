@@ -322,16 +322,6 @@ const REP_SOGLIA_BASSA = 30;  // richiede N+2 conferme
 
 // ─── Utilità GPS ──────────────────────────────────────────────────────────────
 
-/** Distanza in metri tra due coordinate (formula Haversine) */
-const distanzaMetri = (lat1, lng1, lat2, lng2) => {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat/2)**2 +
-    Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-};
-
 /** Richiede posizione corrente. Restituisce {lat, lng} o lancia errore. */
 const ottieniPosizione = () => new Promise((resolve, reject) => {
   if (!navigator.geolocation) {
@@ -1274,6 +1264,11 @@ const TabScontrino = () => {
 
   const inviaVolantino = async () => {
     if (!foto.length) return;
+    if (!utente?.uid) {
+      setStato('errore');
+      setMessaggio('Sessione scaduta — rieffettua il login.');
+      return;
+    }
     if (!insegnaVolantino.trim()) {
       setMessaggio('Inserisci il nome del supermercato.');
       setStato('errore');
@@ -2292,6 +2287,12 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
 
       storeResults.sort((a, b) => b.punteggio !== a.punteggio ? b.punteggio - a.punteggio : a.totalePrezzo - b.totalePrezzo);
 
+      if (!storeResults.length) {
+        setRisultato(null);
+        setIsAnalyzing(false);
+        return;
+      }
+
       if (storeResults.length > 0 && storeResults[0].punteggio > 0) {
         const vincitore = storeResults[0];
         setRisultato({ vincitore, alternative: storeResults.slice(1).filter(r => r.punteggio > 0).slice(0, 3) });
@@ -2739,7 +2740,8 @@ const TabSpese = ({ scontriniReali = [] }) => {
   scontriniMeseCorrente.forEach(s => {
     (s.prodotti || []).forEach(p => {
       const cat = p.categoria || 'dispensa';
-      const spesa = (p.prezzo || 0) * (p.quantita || 1);
+      const prezzoUnitario = p.prezzo_unitario || p.prezzo || 0;
+      const spesa = prezzoUnitario * (p.quantita || 1);
       categorieTotali[cat] = (categorieTotali[cat] || 0) + spesa;
     });
   });
@@ -2754,9 +2756,15 @@ const TabSpese = ({ scontriniReali = [] }) => {
     scontrini.forEach(s => {
       const { mese, anno } = getMeseAnno(s.data_acquisto);
       (s.prodotti || []).forEach(p => {
-        const key = p.nome.toLowerCase().replace(/\s+/g, '_');
-        if (!prezziPerProdotto[key]) prezziPerProdotto[key] = { nome: p.nome, prezzi: [] };
-        prezziPerProdotto[key].prezzi.push({ mese, anno, prezzo: p.prezzo });
+        // I prodotti da scontrino usano nome_normalizzato, quelli mock usano nome
+        const nomeDisplay = p.nome_normalizzato || p.nome_raw || p.nome || '';
+        if (!nomeDisplay) return;
+        // Il prezzo può essere prezzo_unitario (scontrini) o prezzo (offerte/mock)
+        const prezzo = p.prezzo_unitario || p.prezzo || 0;
+        if (!prezzo) return;
+        const key = nomeDisplay.toLowerCase().replace(/\s+/g, '_');
+        if (!prezziPerProdotto[key]) prezziPerProdotto[key] = { nome: nomeDisplay, prezzi: [] };
+        prezziPerProdotto[key].prezzi.push({ mese, anno, prezzo });
       });
     });
     const alert = [];
@@ -3517,8 +3525,11 @@ function AppInterna() {
   const { utente, profilo, preferenze, loading: authLoading, completaOnboarding, completaOnboardingSupermercati } = useAuth();
 
   // ─── Carica scontrini da_validare (badge + UI validazione) ──────────────────
+  // Si ricarica: al mount, quando cambia utente, e quando l'utente torna
+  // al tab Scontrino (activeTab === 'scontrino') per aggiornare il badge.
   useEffect(() => {
     if (!utente) return;
+    if (activeTab !== 'scontrino' && scontriniDaValidare.length > 0) return; // già caricati
     const caricaDaValidare = async () => {
       try {
         const q = query(
@@ -3534,16 +3545,18 @@ function AppInterna() {
       }
     };
     caricaDaValidare();
-  }, [utente]);
+  }, [utente, activeTab]);
 
   // ─── Carica scontrini utente (per tab Spese) ──────────────────────────────
+  // Legge da spese_personali/{uid}/scontrini — contiene TUTTI gli scontrini
+  // inclusi quelli generici (alimentari, rep.panetteria) che non vanno in
+  // prezzi_scontrini ma sono utili per il resoconto mensile.
   useEffect(() => {
     if (!utente) return;
     const caricaScontrini = async () => {
       try {
         const q = query(
-          collection(db, 'prezzi_scontrini'),
-          where('uid', '==', utente.uid),
+          collection(db, 'spese_personali', utente.uid, 'scontrini'),
           orderBy('data_acquisto', 'desc'),
           limit(50)
         );
