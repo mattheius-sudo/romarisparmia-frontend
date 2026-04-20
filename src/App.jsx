@@ -2687,10 +2687,11 @@ const CATEGORIE_COLORI = {
   casa_igiene:    { bg: '#F3F4F6', text: '#374151', label: 'Casa & Igiene' },
 };
 
-const TabSpese = ({ scontriniReali = [] }) => {
-  // Usa scontrini reali se ci sono, altrimenti demo
-  const isDemo = scontriniReali.length === 0;
-  const scontrini = isDemo ? MOCK_SCONTRINI : scontriniReali;
+const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
+  // Usa scontrini reali se il fetch è completato e ci sono dati.
+  // Se non ancora caricato, non mostrare demo (evita flash).
+  const isDemo = dataLoaded && scontriniReali.length === 0;
+  const scontrini = (dataLoaded && scontriniReali.length > 0) ? scontriniReali : (isDemo ? MOCK_SCONTRINI : []);
 
   const oggi = new Date();
   const meseCorrente = oggi.getMonth();
@@ -3709,23 +3710,28 @@ function AppInterna() {
   // Legge da spese_personali/{uid}/scontrini — contiene TUTTI gli scontrini
   // inclusi quelli generici (alimentari, rep.panetteria) che non vanno in
   // prezzi_scontrini ma sono utili per il resoconto mensile.
+  // Si ricarica ogni volta che l'utente apre il tab Spese per avere dati freschi.
+  const [scontriniLoaded, setScontriniLoaded] = useState(false);
   useEffect(() => {
     if (!utente) return;
+    if (activeTab !== 'spese') return;
     const caricaScontrini = async () => {
       try {
         const q = query(
           collection(db, 'spese_personali', utente.uid, 'scontrini'),
-          orderBy('data_acquisto', 'desc'),
+          orderBy('data_registrazione', 'desc'),
           limit(50)
         );
         const snap = await getDocs(q);
         setScontriniUtente(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch {
         setScontriniUtente([]);
+      } finally {
+        setScontriniLoaded(true);
       }
     };
     caricaScontrini();
-  }, [utente]);
+  }, [utente, activeTab]);
 
   // ─── Cache helpers ────────────────────────────────────────────────────────
   // TTL: offerte e stato validi per 6 ore — cambiano solo il giovedì
@@ -3914,7 +3920,7 @@ function AppInterna() {
             />
           : activeTab === 'scontrino' && <TabScontrino />
         }
-        {activeTab === 'spese'      && <TabSpese scontriniReali={scontriniUtente} />}
+        {activeTab === 'spese'      && <TabSpese scontriniReali={scontriniUtente} dataLoaded={scontriniLoaded} />}
         {activeTab === 'profilo'    && <TabProfilo />}
       </div>
 
