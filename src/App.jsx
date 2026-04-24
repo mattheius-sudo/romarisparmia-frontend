@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, getDocs, query, where, orderBy, limit, addDoc, updateDoc, doc, serverTimestamp, increment, getDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where, orderBy, limit, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, increment, getDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { AuthProvider, useAuth, INSEGNE_DISPONIBILI } from './AuthContext';
 // statoVolantini viene ora passato come prop anche alla selezione supermercati
@@ -939,7 +939,52 @@ const SezioneProdottiPreferiti = () => {
 
 const TabProfilo = () => {
   const { utente, profilo, logout, isLoggedIn } = useAuth();
-  const [sezione, setSezione] = useState('account'); // 'account' | 'supermercati' | 'prodotti'
+  const [sezione, setSezione] = useState('account'); // 'account' | 'attivita' | 'supermercati' | 'prodotti'
+  // G1: log attività punti
+  const [logAttivita, setLogAttivita] = useState([]);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logCaricato, setLogCaricato] = useState(false);
+
+  useEffect(() => {
+    if (sezione !== 'attivita' || !utente || logCaricato) return;
+    const carica = async () => {
+      setLogLoading(true);
+      try {
+        // Legge gli scontrini validati come fonte del log punti
+        const q = query(
+          collection(db, 'spese_personali', utente.uid, 'scontrini'),
+          orderBy('data_registrazione', 'desc'),
+          limit(30)
+        );
+        const snap = await getDocs(q);
+        const voci = snap.docs.map(d => {
+          const data = d.data();
+          const ts = data.data_registrazione?.toDate?.();
+          const dataFmt = ts
+            ? ts.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: '2-digit' })
+            : data.data_acquisto || '—';
+          const nSpec = data.n_specifici || 0;
+          let punti = 15;
+          if (nSpec > 10) punti += 5;
+          punti += 5; // bonus settimana (approssimazione)
+          return {
+            id: d.id,
+            tipo: 'scontrino',
+            label: `Scontrino ${data.insegna || ''}`.trim(),
+            dettaglio: `${data.n_prodotti_tot || 0} prodotti · ${nSpec} verificati`,
+            punti: `+${punti}`,
+            data: dataFmt,
+            ts: ts || new Date(data.data_acquisto || 0),
+          };
+        });
+        setLogAttivita(voci);
+        setLogCaricato(true);
+      } catch { setLogAttivita([]); }
+      finally { setLogLoading(false); }
+    };
+    carica();
+  }, [sezione, utente, logCaricato]);
+
   if (!isLoggedIn) return <SchermataLogin />;
 
   const livello = getLivello(profilo?.punti || 0);
@@ -952,6 +997,7 @@ const TabProfilo = () => {
 
   const TAB_PROFILO = [
     { id: 'account', label: 'Account' },
+    { id: 'attivita', label: 'Attività' },
     { id: 'supermercati', label: 'Supermercati' },
     { id: 'prodotti', label: 'Preferiti' },
   ];
@@ -1126,6 +1172,101 @@ const TabProfilo = () => {
 
         {sezione === 'supermercati' && <SezioneSupermercati />}
         {sezione === 'prodotti' && <SezioneProdottiPreferiti />}
+
+        {/* G1: Sezione Attività — log punti */}
+        {sezione === 'attivita' && (
+          <div className="space-y-3">
+            {/* Riepilogo punti totali */}
+            <div className="rounded-[20px] p-5"
+              style={{ background: T.primary, boxShadow: '0 8px 24px rgba(100,113,68,0.25)' }}>
+              <p className="text-xs uppercase tracking-wider mb-1" style={{ color: 'rgba(255,255,255,0.65)' }}>
+                Punti totali guadagnati
+              </p>
+              <p style={{ fontFamily: "'Lora', serif", fontSize: '40px', fontWeight: 500, color: '#fff', lineHeight: 1 }}>
+                {profilo?.punti || 0}
+              </p>
+              <p className="text-sm mt-2" style={{ color: 'rgba(255,255,255,0.7)' }}>
+                {profilo?.scontrini_totali || 0} scontrini contribuiti alla community
+              </p>
+            </div>
+
+            {/* Feed attività */}
+            <div className="rounded-[20px] overflow-hidden"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <div className="px-5 pt-5 pb-3 flex items-center justify-between"
+                style={{ borderBottom: `1px solid ${T.border}` }}>
+                <h3 className="text-sm font-medium" style={{ color: T.textPrimary }}>Storico attività</h3>
+                <Receipt size={16} strokeWidth={1.5} style={{ color: T.textSec }} />
+              </div>
+
+              {logLoading ? (
+                <div className="px-5 py-10 flex flex-col items-center gap-3">
+                  <Loader size={24} strokeWidth={1.5} className="animate-spin" style={{ color: T.primary }} />
+                  <p className="text-sm" style={{ color: T.textSec }}>Carico attività...</p>
+                </div>
+              ) : logAttivita.length === 0 ? (
+                <div className="px-5 py-10 text-center">
+                  <ClipboardCheck size={32} strokeWidth={1} className="mx-auto mb-3" style={{ color: T.border }} />
+                  <p className="text-sm font-medium" style={{ color: T.textPrimary }}>Nessuna attività ancora</p>
+                  <p className="text-xs mt-1" style={{ color: T.textSec }}>
+                    Carica il tuo primo scontrino per iniziare a guadagnare punti
+                  </p>
+                </div>
+              ) : (
+                logAttivita.map((voce, i) => (
+                  <div key={voce.id} className="flex items-center px-5 py-3.5"
+                    style={{ borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
+                    {/* Icona tipo */}
+                    <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mr-3"
+                      style={{ background: '#EEF2E4' }}>
+                      <Receipt size={16} strokeWidth={1.5} style={{ color: T.primary }} />
+                    </div>
+                    {/* Contenuto */}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium truncate" style={{ color: T.textPrimary }}>{voce.label}</p>
+                      <p className="text-xs mt-0.5 truncate" style={{ color: T.textSec }}>
+                        {voce.dettaglio} · {voce.data}
+                      </p>
+                    </div>
+                    {/* Punti */}
+                    <span className="ml-3 shrink-0 text-sm font-semibold px-2.5 py-1 rounded-xl"
+                      style={{ background: '#EEF2E4', color: T.primary, fontFamily: "'Lora', serif" }}>
+                      {voce.punti} pt
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Legenda come guadagnare */}
+            <div className="rounded-[20px] p-5"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <h3 className="text-xs font-medium uppercase tracking-wider mb-4" style={{ color: T.textSec }}>
+                Come guadagnare punti
+              </h3>
+              <div className="space-y-3">
+                {[
+                  { emoji: '🧾', azione: 'Scontrino confermato', punti: '+15 pt', note: 'Base' },
+                  { emoji: '📦', azione: 'Scontrino con 10+ prodotti', punti: '+5 pt', note: 'Bonus' },
+                  { emoji: '📅', azione: 'Primo scontrino settimana', punti: '+5 pt', note: 'Bonus' },
+                  { emoji: '🗞️', azione: 'Volantino approvato', punti: '+25 pt', note: 'Community' },
+                  { emoji: '🏷️', azione: 'Volantino insegna nuova', punti: '+5 pt', note: 'Bonus' },
+                ].map((r, i) => (
+                  <div key={i} className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <span style={{ fontSize: '16px' }}>{r.emoji}</span>
+                      <div>
+                        <p className="text-sm" style={{ color: T.textPrimary }}>{r.azione}</p>
+                        <p className="text-[10px] uppercase font-medium" style={{ color: T.textSec }}>{r.note}</p>
+                      </div>
+                    </div>
+                    <span className="text-sm font-semibold" style={{ color: T.primary }}>{r.punti}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1144,10 +1285,46 @@ const TabScontrino = () => {
   const [validoFino, setValidoFino] = useState('');
   // Posizione GPS rilevata durante l'upload (metadato opzionale)
   const [posizioneRilevata, setPosizioneRilevata] = useState(null);
+  // A1: scontrini in_attesa annullabili
+  const [scontriniInAttesa, setScontriniInAttesa] = useState([]);
+  const [loadingInAttesa, setLoadingInAttesa] = useState(false);
+  const [annullando, setAnnullando] = useState(null); // id doc in annullamento
   const inputRef = React.useRef(null);
   const inputVolRef = React.useRef(null);
   const MAX_FOTO = 4;
   const MAX_FOTO_VOL = 8;
+
+  // A1: carica scontrini in attesa all'apertura del tab
+  useEffect(() => {
+    if (!utente) return;
+    const carica = async () => {
+      setLoadingInAttesa(true);
+      try {
+        const q = query(
+          collection(db, 'coda_scontrini'),
+          where('uid', '==', utente.uid),
+          where('stato', '==', 'in_attesa'),
+          orderBy('data_caricamento', 'desc'),
+          limit(10)
+        );
+        const snap = await getDocs(q);
+        setScontriniInAttesa(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch { setScontriniInAttesa([]); }
+      finally { setLoadingInAttesa(false); }
+    };
+    carica();
+  }, [utente]);
+
+  // A1: annulla un singolo scontrino in_attesa
+  const annullaScontrino = async (docId) => {
+    setAnnullando(docId);
+    try {
+      await deleteDoc(doc(db, 'coda_scontrini', docId));
+      setScontriniInAttesa(prev => prev.filter(s => s.id !== docId));
+    } catch (err) {
+      console.error('Errore annullamento:', err);
+    } finally { setAnnullando(null); }
+  };
 
   const cambiaModalita = (m) => {
     setModalita(m);
@@ -1388,8 +1565,66 @@ const TabScontrino = () => {
 
         {/* ── STATO IDLE ── */}
         {stato === 'idle' && modalita === 'scontrino' && (
-          <div className="rounded-[24px] p-6 mb-4 animate-fade-in-up"
-            style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
+          <div className="space-y-4 animate-fade-in-up">
+
+            {/* A1: Scontrini in attesa — annullabili */}
+            {(loadingInAttesa || scontriniInAttesa.length > 0) && (
+              <div className="rounded-[20px] overflow-hidden"
+                style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 20px rgba(44,48,38,0.07)' }}>
+                <div className="px-5 pt-4 pb-3 flex items-center justify-between"
+                  style={{ borderBottom: `1px solid ${T.border}` }}>
+                  <div>
+                    <h3 className="text-sm font-medium" style={{ color: T.textPrimary }}>In elaborazione</h3>
+                    <p className="text-xs mt-0.5" style={{ color: T.textSec }}>Elaborati stanotte — puoi ancora annullare</p>
+                  </div>
+                  {scontriniInAttesa.length > 0 && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                      style={{ background: '#EEF2E4', color: T.primary }}>
+                      {scontriniInAttesa.length}
+                    </span>
+                  )}
+                </div>
+                {loadingInAttesa ? (
+                  <div className="px-5 py-4 flex items-center gap-2">
+                    <Loader size={14} strokeWidth={1.5} className="animate-spin" style={{ color: T.textSec }} />
+                    <span className="text-xs" style={{ color: T.textSec }}>Carico...</span>
+                  </div>
+                ) : (
+                  scontriniInAttesa.map((s, i) => {
+                    const ts = s.data_caricamento?.toDate?.();
+                    const dataFmt = ts
+                      ? ts.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })
+                      : '—';
+                    return (
+                      <div key={s.id} className="flex items-center px-5 py-3"
+                        style={{ borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
+                        <div className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 mr-3"
+                          style={{ background: '#EEF2E4' }}>
+                          <Receipt size={15} strokeWidth={1.5} style={{ color: T.primary }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium" style={{ color: T.textPrimary }}>
+                            {s.n_foto > 1 ? `${s.n_foto} foto` : '1 foto'}
+                          </p>
+                          <p className="text-xs mt-0.5" style={{ color: T.textSec }}>{dataFmt}</p>
+                        </div>
+                        <button
+                          onClick={() => annullaScontrino(s.id)}
+                          disabled={annullando === s.id}
+                          className="ml-3 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-40"
+                          style={{ background: '#FEE2E2', color: '#DC2626' }}>
+                          {annullando === s.id ? '...' : 'Annulla'}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* Card fotocamera */}
+            <div className="rounded-[24px] p-6"
+              style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
             <label htmlFor="scontrino-input" className="block cursor-pointer">
               <div className="rounded-[20px] flex flex-col items-center justify-center gap-4 py-12 mb-5 transition-all active:scale-[0.98]"
                 style={{ background: T.bg, border: `2px dashed ${T.border}` }}>
@@ -1417,7 +1652,8 @@ const TabScontrino = () => {
                 ))}
               </div>
             </div>
-          </div>
+          </div>{/* chiude card fotocamera */}
+          </div>{/* chiude space-y-4 */}
         )}
 
         {stato === 'idle' && modalita === 'volantino' && (
@@ -2317,23 +2553,37 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
 
       const offerteOtt = offerte.map(o => ({ ...o, sN: (o.nome||'').toLowerCase(), sM: (o.marca||'').toLowerCase(), sC: (o.categoria||'').toLowerCase() }));
 
+      // A3: matching a due livelli — esatto word-by-word, poi fallback con ≥ metà parole
+      const matchaParola = (testo, parola) => {
+        const escaped = parola.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`(^|[\\s,./\\-])${escaped}([\\s,./\\-]|$)`, 'i').test(' ' + testo + ' ');
+      };
+      const punteggioCandidato = (o, parole) => {
+        // quante parole della ricerca matchano il nome/marca
+        return parole.filter(p => matchaParola(o.sN, p) || matchaParola(o.sM, p) || o.sC.includes(p)).length;
+      };
+
       const storeResults = insegne.map(insegna => {
         const storeOffers = offerteOtt.filter(o => o.insegna === insegna);
         let trovati = [], nonTrovati = [], totalePrezzo = 0;
         items.forEach(itemStr => {
           const parole = itemStr.toLowerCase().split(' ').filter(p => p.length > 1);
-          const matchaParola = (testo, parola) => {
-            const escaped = parola.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp(`(^|[\\s,./\\-])${escaped}([\\s,./\\-]|$)`, 'i');
-            return re.test(' ' + testo + ' ');
-          };
-          const goodMatches = storeOffers.filter(o =>
-            parole.every(p => matchaParola(o.sN, p) || matchaParola(o.sM, p) || o.sC.includes(p))
-          );
-          if (goodMatches.length > 0) {
-            goodMatches.sort((a, b) => a.prezzo - b.prezzo);
-            const best = goodMatches[0];
-            if (!trovati.find(t => t.offerta.id === best.id)) { trovati.push({ ricerca: itemStr, offerta: best }); totalePrezzo += best.prezzo; }
+          // Match esatto: TUTTE le parole
+          const esatti = storeOffers.filter(o => parole.every(p => matchaParola(o.sN, p) || matchaParola(o.sM, p) || o.sC.includes(p)));
+          // Fallback fuzzy: ≥ metà delle parole (min 1)
+          const soglia = Math.max(1, Math.ceil(parole.length / 2));
+          const parziali = esatti.length === 0
+            ? storeOffers.filter(o => punteggioCandidato(o, parole) >= soglia)
+            : [];
+          const candidati = esatti.length > 0 ? esatti : parziali;
+          if (candidati.length > 0) {
+            // Ordina per: punteggio desc, poi prezzo asc
+            candidati.sort((a, b) => punteggioCandidato(b, parole) - punteggioCandidato(a, parole) || a.prezzo - b.prezzo);
+            const best = candidati[0];
+            if (!trovati.find(t => t.offerta.id === best.id)) {
+              trovati.push({ ricerca: itemStr, offerta: best, fuzzy: esatti.length === 0 });
+              totalePrezzo += best.prezzo;
+            }
           } else { nonTrovati.push(itemStr); }
         });
         const idsTrovati = trovati.map(t => t.offerta.id);
@@ -2600,9 +2850,11 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                         <div className="flex-1 min-w-0">
                           <div className="text-sm font-medium text-white truncate">
                             {t.offerta.nome}{t.offerta.marca ? ` · ${t.offerta.marca}` : ''}
+                            {t.fuzzy && <span className="ml-1.5 text-[10px] font-bold opacity-75">~</span>}
                           </div>
                           <div className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.65)' }}>
                             cercato: "{t.ricerca}"{t.offerta.grammatura ? ` · ${t.offerta.grammatura}` : ''}
+                            {t.fuzzy && <span className="ml-1 opacity-75">· corrispondenza parziale</span>}
                           </div>
                         </div>
                         <div className="font-semibold ml-3 shrink-0 px-2.5 py-1 rounded-xl"
@@ -2816,6 +3068,16 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
   const isDemo = dataLoaded && scontriniReali.length === 0;
   const scontrini = (dataLoaded && scontriniReali.length > 0) ? scontriniReali : (isDemo ? MOCK_SCONTRINI : []);
 
+  // A2: filtro per insegna
+  const [filtroInsegna, setFiltroInsegna] = useState(null);
+  const scontriniBase = filtroInsegna
+    ? scontrini.filter(s => s.insegna === filtroInsegna)
+    : scontrini;
+  // insegne disponibili negli scontrini (per il chip-filter)
+  const insegneDisponibili = useMemo(() =>
+    [...new Set(scontrini.map(s => s.insegna).filter(Boolean))].sort(),
+    [scontrini]);
+
   const oggi = new Date();
   const meseCorrente = oggi.getMonth();
   const annoCorrente = oggi.getFullYear();
@@ -2826,12 +3088,12 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
     return { mese: d.getMonth(), anno: d.getFullYear() };
   };
 
-  const scontriniMeseCorrente = scontrini.filter(s => {
+  const scontriniMeseCorrente = scontriniBase.filter(s => {
     const { mese, anno } = getMeseAnno(s.data_acquisto);
     return mese === meseCorrente && anno === annoCorrente;
   });
 
-  const scontriniMesePrecedente = scontrini.filter(s => {
+  const scontriniMesePrecedente = scontriniBase.filter(s => {
     const { mese, anno } = getMeseAnno(s.data_acquisto);
     const mesePrecedente = meseCorrente === 0 ? 11 : meseCorrente - 1;
     const annoPrecedente = meseCorrente === 0 ? annoCorrente - 1 : annoCorrente;
@@ -2891,19 +3153,19 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
     scontrini.forEach(s => {
       const { mese, anno } = getMeseAnno(s.data_acquisto);
       (s.prodotti || []).forEach(p => {
-        // I prodotti da scontrino usano nome_normalizzato, quelli mock usano nome
         const nomeDisplay = p.nome_normalizzato || p.nome_raw || p.nome || '';
         if (!nomeDisplay) return;
-        // Il prezzo può essere prezzo_unitario (scontrini) o prezzo (offerte/mock)
         const prezzo = p.prezzo_unitario || p.prezzo || 0;
         if (!prezzo) return;
         const key = nomeDisplay.toLowerCase().replace(/\s+/g, '_');
-        if (!prezziPerProdotto[key]) prezziPerProdotto[key] = { nome: nomeDisplay, prezzi: [] };
+        if (!prezziPerProdotto[key]) prezziPerProdotto[key] = { nome: nomeDisplay, prezzi: [], grammature: [] };
         prezziPerProdotto[key].prezzi.push({ mese, anno, prezzo });
+        // G2: accumula grammatura se disponibile
+        if (p.grammatura) prezziPerProdotto[key].grammature.push({ mese, anno, grammatura: p.grammatura });
       });
     });
     const alert = [];
-    Object.values(prezziPerProdotto).forEach(({ nome, prezzi }) => {
+    Object.values(prezziPerProdotto).forEach(({ nome, prezzi, grammature }) => {
       if (prezzi.length < 2) return;
       const ordinati = prezzi.sort((a, b) => (a.anno * 12 + a.mese) - (b.anno * 12 + b.mese));
       const primo = ordinati[0];
@@ -2911,12 +3173,75 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
       if (primo.prezzo === ultimo.prezzo) return;
       const perc = Math.round(((ultimo.prezzo - primo.prezzo) / primo.prezzo) * 100);
       if (Math.abs(perc) >= 10) {
-        alert.push({ nome, perc, prezzoVecchio: primo.prezzo, prezzoNuovo: ultimo.prezzo });
+        alert.push({ nome, perc, prezzoVecchio: primo.prezzo, prezzoNuovo: ultimo.prezzo, tipo: 'prezzo' });
       }
     });
     return alert.sort((a, b) => Math.abs(b.perc) - Math.abs(a.perc)).slice(0, 3);
   };
   const alertTrend = trovaTrend();
+
+  // G2: Shrinkflation detector — stesso prodotto, grammatura calata nel tempo
+  const shrinkflation = useMemo(() => {
+    if (isDemo || scontrini.length < 3) return [];
+    // Estrae grammatura in grammi da stringhe tipo "500g", "1kg", "33cl", "1L"
+    const parseGrammi = (str) => {
+      if (!str) return null;
+      const s = str.toLowerCase().replace(/\s/g, '');
+      const m = s.match(/(\d+(?:[.,]\d+)?)\s*(kg|g|l|cl|ml)/);
+      if (!m) return null;
+      const val = parseFloat(m[1].replace(',', '.'));
+      switch (m[2]) {
+        case 'kg': return val * 1000;
+        case 'g':  return val;
+        case 'l':  return val * 1000;
+        case 'cl': return val * 10;
+        case 'ml': return val;
+        default:   return null;
+      }
+    };
+
+    const perProdotto = {};
+    scontrini.forEach(s => {
+      const { mese, anno } = getMeseAnno(s.data_acquisto);
+      (s.prodotti || []).forEach(p => {
+        const nome = (p.nome_normalizzato || p.nome_raw || '').trim();
+        if (!nome || !p.grammatura) return;
+        const grammi = parseGrammi(p.grammatura);
+        if (!grammi) return;
+        const prezzo = p.prezzo_unitario || p.prezzo || 0;
+        if (!prezzo) return;
+        const key = nome.toLowerCase().replace(/\s+/g, '_');
+        if (!perProdotto[key]) perProdotto[key] = { nome, misure: [] };
+        perProdotto[key].misure.push({ mese, anno, grammi, prezzo, grammaturaRaw: p.grammatura });
+      });
+    });
+
+    const allarmi = [];
+    Object.values(perProdotto).forEach(({ nome, misure }) => {
+      if (misure.length < 2) return;
+      const ord = misure.sort((a, b) => (a.anno * 12 + a.mese) - (b.anno * 12 + b.mese));
+      const prima = ord[0];
+      const ultima = ord[ord.length - 1];
+      if (prima.grammi === ultima.grammi) return;
+      const deltaGrammi = Math.round(((ultima.grammi - prima.grammi) / prima.grammi) * 100);
+      // Shrinkflation: grammatura scesa ≥ 5% — il prezzo non scende di pari passo
+      if (deltaGrammi <= -5) {
+        const prezzoPer100gPrima = (prima.prezzo / prima.grammi) * 100;
+        const prezzoPer100gUltima = (ultima.prezzo / ultima.grammi) * 100;
+        const deltaPrezzoKg = Math.round(((prezzoPer100gUltima - prezzoPer100gPrima) / prezzoPer100gPrima) * 100);
+        allarmi.push({
+          nome,
+          deltaGrammi,        // negativo = rimpicciolimento
+          deltaPrezzoKg,      // positivo = paghi di più al kg
+          grammaturaPrima: prima.grammaturaRaw,
+          grammaturaUltima: ultima.grammaturaRaw,
+          prezzoPrima: prima.prezzo,
+          prezzoUltima: ultima.prezzo,
+        });
+      }
+    });
+    return allarmi.sort((a, b) => a.deltaGrammi - b.deltaGrammi).slice(0, 3);
+  }, [scontrini, isDemo]);
 
   // ── Mesi nomi ────────────────────────────────────────────────────────────
   const MESI_NOMI = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno',
@@ -2964,15 +3289,16 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
     <div className="flex flex-col h-full pb-32 overflow-y-auto hide-scrollbar" style={{ background: T.bg }}>
 
       {/* Header */}
-      <div className="px-5 pt-8 pb-6 sticky top-0 z-10"
+      <div className="px-5 pt-8 pb-4 sticky top-0 z-10"
         style={{ background: 'rgba(249,248,244,0.9)', backdropFilter: 'blur(12px)', borderBottom: `1px solid ${T.border}` }}>
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between mb-3">
           <div>
             <h2 style={{ fontFamily: "'Lora', serif", fontSize: '26px', fontWeight: 500, color: T.textPrimary }}>
               Le mie spese
             </h2>
             <p className="text-sm mt-0.5" style={{ color: T.textSec }}>
               {MESI_NOMI[meseCorrente]} {annoCorrente}
+              {filtroInsegna && <span style={{ color: T.primary }}> · {filtroInsegna}</span>}
             </p>
           </div>
           {isDemo && (
@@ -2982,6 +3308,29 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
             </span>
           )}
         </div>
+        {/* A2: chip filtro per insegna */}
+        {insegneDisponibili.length > 1 && (
+          <div className="flex gap-2 overflow-x-auto hide-scrollbar pb-1">
+            <button
+              onClick={() => setFiltroInsegna(null)}
+              className="px-3 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
+              style={!filtroInsegna
+                ? { background: T.primary, color: '#fff' }
+                : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+              Tutti
+            </button>
+            {insegneDisponibili.map(ins => (
+              <button key={ins}
+                onClick={() => setFiltroInsegna(ins === filtroInsegna ? null : ins)}
+                className="px-3 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
+                style={filtroInsegna === ins
+                  ? { background: T.primary, color: '#fff' }
+                  : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                {ins.split('/')[0]}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="px-4 pt-4 space-y-4">
@@ -3270,6 +3619,56 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
                 );
               })}
             </div>
+        )}
+
+        {/* G2: ── Shrinkflation detector ── */}
+        {shrinkflation.length > 0 && (
+          <div className="rounded-[20px] overflow-hidden"
+            style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+            <div className="px-5 pt-5 pb-3 flex items-center justify-between"
+              style={{ borderBottom: `1px solid ${T.border}` }}>
+              <div>
+                <h3 className="text-sm font-medium" style={{ color: T.textPrimary }}>📦 Shrinkflation rilevata</h3>
+                <p className="text-xs mt-0.5" style={{ color: T.textSec }}>
+                  Stessa confezione, meno prodotto — paghi di più al kg
+                </p>
+              </div>
+              <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                style={{ background: '#FFF0E8', color: T.accent }}>
+                {shrinkflation.length} prodott{shrinkflation.length === 1 ? 'o' : 'i'}
+              </span>
+            </div>
+            {shrinkflation.map((s, i) => (
+              <div key={i} className="px-5 py-3.5"
+                style={{ borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate" style={{ color: T.textPrimary }}>{s.nome}</p>
+                    <div className="flex items-center gap-2 mt-1 flex-wrap">
+                      <span className="text-xs px-2 py-0.5 rounded-md font-medium"
+                        style={{ background: '#FFF0E8', color: T.accent }}>
+                        {s.grammaturaPrima} → {s.grammaturaUltima}
+                        {' '}({s.deltaGrammi}%)
+                      </span>
+                      {s.deltaPrezzoKg > 0 && (
+                        <span className="text-xs" style={{ color: T.textSec }}>
+                          prezzo/kg +{s.deltaPrezzoKg}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-sm font-semibold" style={{ fontFamily: "'Lora', serif", color: T.accent }}>
+                      {formattaPrezzo(s.prezzoUltima)}
+                    </p>
+                    <p className="text-xs mt-0.5 line-through" style={{ color: T.textSec }}>
+                      {formattaPrezzo(s.prezzoPrima)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {/* ── Lista scontrini ── */}
