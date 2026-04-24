@@ -1652,8 +1652,8 @@ const TabScontrino = () => {
                 ))}
               </div>
             </div>
-          </div>{/* chiude card fotocamera */}
-          </div>{/* chiude space-y-4 */}
+          </div>
+          </div>
         )}
 
         {stato === 'idle' && modalita === 'volantino' && (
