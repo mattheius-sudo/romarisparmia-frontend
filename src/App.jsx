@@ -1486,20 +1486,28 @@ const TabScontrino = () => {
     setStato('caricando');
 
     try {
-
-      await addDoc(collection(db, 'coda_volantini'), {
-        uid: utente.uid,
-        immagini_b64: foto.map(f => f.base64),
-        n_foto: foto.length,
-        insegna: insegnaVolantino.trim(),
-        valido_fino: validoFino || null,
-        stato: 'in_attesa',
+      // Documento testata — contiene solo metadati, nessuna immagine
+      const testatRef = await addDoc(collection(db, 'coda_volantini'), {
+        uid:              utente.uid,
+        n_foto:           foto.length,
+        insegna:          insegnaVolantino.trim(),
+        valido_fino:      validoFino || null,
+        stato:            'in_attesa',
         data_caricamento: serverTimestamp(),
-        // Metadati posizione (opzionale per i volantini — portati a casa)
         posizione_upload: posizioneRilevata
           ? { lat: posizioneRilevata.lat, lng: posizioneRilevata.lng }
           : null,
       });
+
+      // Un documento per ogni pagina — evita il limite 1MB di Firestore
+      // Le immagini vengono cancellate dal backend dopo l'estrazione
+      await Promise.all(foto.map((f, idx) =>
+        addDoc(collection(db, 'coda_volantini', testatRef.id, 'pagine'), {
+          uid:       utente.uid,
+          indice:    idx,
+          base64:    f.base64,
+        })
+      ));
 
       setFoto([]);
       setPosizioneRilevata(null);
