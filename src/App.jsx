@@ -2125,52 +2125,62 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
   const [categoriaAttiva, setCategoriaAttiva] = useState(null);
   const [ordinamento, setOrdinamento] = useState('prezzo_asc');
   const [showOrdinamento, setShowOrdinamento] = useState(false);
+  const [filtroInsegna, setFiltroInsegna] = useState(null); // filtro supermercato
 
   // ── Store segnalazioni — un'unica istanza per tutto il tab ───────────────
   const { segnalati, segnala } = useSegnalazioniStore();
 
   // ── Deduplicazione + filtro nascosto ─────────────────────────────────────
-  // Le offerte con nascosto:true (>= 3 segnalazioni) spariscono dalla vista
   const offerteDedup = useMemo(() => {
     const seen = new Map();
     offerte.forEach(o => {
-      if (o.nascosto) return; // escludi offerte segnalate dalla community
+      if (o.nascosto) return;
       const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
       if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
     });
     return [...seen.values()].filter(o => !o.valido_fino || o.valido_fino >= OGGI);
   }, [offerte]);
 
+  // ── Insegne disponibili per il chip-filter ────────────────────────────────
+  const insegneOfferte = useMemo(() =>
+    [...new Set(offerteDedup.map(o => o.insegna).filter(Boolean))].sort(),
+    [offerteDedup]);
+
+  // ── Base filtrata per insegna — applicata a highlights, sfoglia e cerca ──
+  const offerteBase = useMemo(() =>
+    filtroInsegna ? offerteDedup.filter(o => o.insegna === filtroInsegna) : offerteDedup,
+    [offerteDedup, filtroInsegna]);
+
   // ── HIGHLIGHTS: le migliori offerte curate ────────────────────────────────
   const highlights = useMemo(() => {
     // Sezione 1: in scadenza oggi o domani (urgenza)
-    const urgenti = offerteDedup
+    const urgenti = offerteBase
       .filter(o => o.valido_fino === OGGI || o.valido_fino === DOMANI)
       .sort((a, b) => a.prezzo - b.prezzo)
       .slice(0, 8);
 
     // Sezione 2: top per categoria (il prodotto più economico di ogni categoria)
     const catMap = {};
-    offerteDedup.forEach(o => {
+    offerteBase.forEach(o => {
       const cat = o.categoria || 'altro';
       if (!catMap[cat] || catMap[cat].prezzo > o.prezzo) catMap[cat] = o;
     });
     const topCategorie = Object.values(catMap).sort((a,b) => a.prezzo - b.prezzo);
 
     // Sezione 3: offerte con fidelity card (hidden gems)
-    const conTessera = offerteDedup
+    const conTessera = offerteBase
       .filter(o => o.fidelity_req)
       .sort((a, b) => a.prezzo - b.prezzo)
       .slice(0, 6);
 
     return { urgenti, topCategorie, conTessera };
-  }, [offerteDedup]);
+  }, [offerteBase]);
 
   // ── SFOGLIA: raggruppate per categoria o filtrate ─────────────────────────
   const offerteSfoglia = useMemo(() => {
     let base = categoriaAttiva
       ? offerteDedup.filter(o => o.categoria === categoriaAttiva)
-      : offerteDedup;
+      : offerteBase;
     return [...base].sort((a, b) => {
       if (ordinamento === 'prezzo_asc') return a.prezzo - b.prezzo;
       if (ordinamento === 'prezzo_desc') return b.prezzo - a.prezzo;
@@ -2179,13 +2189,13 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
       if (ordinamento === 'insegna') return (a.insegna||'').localeCompare(b.insegna||'');
       return 0;
     });
-  }, [offerteDedup, categoriaAttiva, ordinamento]);
+  }, [offerteBase, categoriaAttiva, ordinamento]);
 
   // ── CERCA ─────────────────────────────────────────────────────────────────
   const offerteRicerca = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase().trim();
-    return offerteDedup
+    return offerteBase
       .filter(o =>
         (o.nome||'').toLowerCase().includes(q) ||
         (o.marca||'').toLowerCase().includes(q) ||
@@ -2193,14 +2203,14 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
       )
       .sort((a, b) => a.prezzo - b.prezzo)
       .slice(0, 60);
-  }, [offerteDedup, searchQuery]);
+  }, [offerteBase, searchQuery]);
 
   // ── Categorie disponibili con conteggi ────────────────────────────────────
   const categorieConCount = useMemo(() => {
     const counts = {};
-    offerteDedup.forEach(o => { const c = o.categoria || 'altro'; counts[c] = (counts[c]||0)+1; });
+    offerteBase.forEach(o => { const c = o.categoria || 'altro'; counts[c] = (counts[c]||0)+1; });
     return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-  }, [offerteDedup]);
+  }, [offerteBase]);
 
   // ── Cerca auto-switch ─────────────────────────────────────────────────────
   const handleSearch = (v) => {
@@ -2265,7 +2275,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
           </div>
           <span className="text-xs font-medium px-2.5 py-1 rounded-full"
             style={{ background: '#EEF2E4', color: T.primary }}>
-            {offerteDedup.length.toLocaleString('it-IT')} offerte
+            {offerteBase.length.toLocaleString('it-IT')} offerte
           </span>
         </div>
 
@@ -2325,6 +2335,31 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
             </div>
           )}
         </div>
+
+        {/* Filtro per insegna — chip scrollabili */}
+        {insegneOfferte.length > 1 && (
+          <div className="flex gap-2 overflow-x-auto hide-scrollbar px-4 py-2.5"
+            style={{ borderBottom: `1px solid ${T.border}`, background: 'rgba(249,248,244,0.92)', backdropFilter: 'blur(14px)' }}>
+            <button
+              onClick={() => setFiltroInsegna(null)}
+              className="px-3.5 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
+              style={!filtroInsegna
+                ? { background: T.primary, color: '#fff' }
+                : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
+              Tutti
+            </button>
+            {insegneOfferte.map(ins => (
+              <button key={ins}
+                onClick={() => setFiltroInsegna(ins === filtroInsegna ? null : ins)}
+                className="px-3.5 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
+                style={filtroInsegna === ins
+                  ? { background: T.primary, color: '#fff' }
+                  : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
+                {ins.split('/')[0].trim()}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ── CONTENUTO ── */}
