@@ -18,6 +18,7 @@ import {
   User,
   LogOut,
   ChevronRight,
+  Check,
   Shield,
   Receipt,
   TrendingDown,
@@ -1288,7 +1289,8 @@ const TabProfilo = () => {
 // ─── Tab Invia Scontrino ─────────────────────────────────────────────────────
 
 const TabScontrino = () => {
-  const { utente } = useAuth();
+  const { utente, profilo } = useAuth();
+  const isGuru = (profilo?.punti || 0) >= 1000;
   const [modalita, setModalita] = useState('scontrino');
   const [stato, setStato] = useState('idle');
   const [messaggio, setMessaggio] = useState('');
@@ -1557,14 +1559,16 @@ const TabScontrino = () => {
           ].map(m => (
             <button
               key={m.id}
-              onClick={() => cambiaModalita(m.id)}
+              onClick={() => m.id === 'volantino' && !isGuru ? null : cambiaModalita(m.id)}
               className="px-4 py-1.5 rounded-xl text-sm font-medium transition-all"
               style={modalita === m.id
                 ? { background: '#fff', color: T.primary }
-                : { color: 'rgba(255,255,255,0.7)' }
+                : m.id === 'volantino' && !isGuru
+                  ? { color: 'rgba(255,255,255,0.35)', cursor: 'default' }
+                  : { color: 'rgba(255,255,255,0.7)' }
               }
             >
-              {m.label}
+              {m.label}{m.id === 'volantino' && !isGuru ? ' 🔒' : ''}
             </button>
           ))}
         </div>
@@ -1677,8 +1681,39 @@ const TabScontrino = () => {
           </div>
         )}
 
+        {/* ── STATO IDLE VOLANTINO ── */}
         {stato === 'idle' && modalita === 'volantino' && (
-          <div className="animate-fade-in-up space-y-4">
+          !isGuru ? (
+            /* Wall — solo livello Guru può caricare volantini */
+            <div className="rounded-[24px] p-7 text-center animate-fade-in-up"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 8px 30px rgba(44,48,38,0.08)' }}>
+              <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4"
+                style={{ background: '#EEF2E4' }}>
+                <span style={{ fontSize: '32px' }}>🌟</span>
+              </div>
+              <h3 className="text-base font-semibold mb-2" style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
+                Solo i Guru possono caricare volantini
+              </h3>
+              <p className="text-sm leading-relaxed mb-4" style={{ color: T.textSec }}>
+                Per garantire la qualità dei dati, il caricamento di volantini è riservato agli utenti
+                che hanno raggiunto il livello <strong>Guru (1000 pt)</strong>.
+              </p>
+              <div className="rounded-2xl p-4 mb-4" style={{ background: '#EEF2E4' }}>
+                <p className="text-xs font-medium mb-1" style={{ color: T.primary }}>I tuoi punti attuali</p>
+                <p style={{ fontFamily: "'Lora', serif", fontSize: '28px', fontWeight: 500, color: T.primary }}>
+                  {profilo?.punti || 0} / 1000
+                </p>
+                <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(100,113,68,0.2)' }}>
+                  <div className="h-full rounded-full transition-all"
+                    style={{ width: `${Math.min(100, ((profilo?.punti || 0) / 1000) * 100)}%`, background: T.primary }} />
+                </div>
+              </div>
+              <p className="text-xs" style={{ color: T.textSec }}>
+                Carica scontrini per guadagnare punti e sbloccare questa funzione 🧾
+              </p>
+            </div>
+          ) : (
+            <div className="animate-fade-in-up space-y-4">
             {/* Card info */}
             <div className="rounded-[24px] p-6"
               style={{ background: T.surface, boxShadow: '0 8px 30px rgba(44,48,38,0.1)', border: `1px solid ${T.border}` }}>
@@ -1743,6 +1778,7 @@ const TabScontrino = () => {
               </p>
             </div>
           </div>
+          )
         )}
 
         {/* ── STATO ANTEPRIMA (uguale per entrambe le modalità) ── */}
@@ -3076,10 +3112,55 @@ const CATEGORIE_COLORI = {
 };
 
 const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
+  const { utente } = useAuth();
   // Usa scontrini reali se il fetch è completato e ci sono dati.
   // Se non ancora caricato, non mostrare demo (evita flash).
   const isDemo = dataLoaded && scontriniReali.length === 0;
   const scontrini = (dataLoaded && scontriniReali.length > 0) ? scontriniReali : (isDemo ? MOCK_SCONTRINI : []);
+
+  // Sprint 2: modal drill-down scontrino con editing prodotti
+  const [modalScontrino, setModalScontrino]         = useState(null);  // scontrino aperto
+  const [prodottiEdit, setProdottiEdit]             = useState([]);    // copia locale per editing
+  const [salvataggioPending, setSalvataggioPending] = useState(false);
+  const [prodottoFocus, setProdottoFocus]           = useState(null);  // indice prodotto in edit
+
+  const apriModalScontrino = (s) => {
+    if (isDemo) return;
+    // Clona i prodotti per editing locale — preserva nome_raw intatto
+    const clone = (s.prodotti || []).map(p => ({ ...p }));
+    setProdottiEdit(clone);
+    setModalScontrino(s);
+    setProdottoFocus(null);
+  };
+
+  const chiudiModal = () => {
+    setModalScontrino(null);
+    setProdottiEdit([]);
+    setProdottoFocus(null);
+  };
+
+  const aggiornaNomeNorm = (idx, valore) => {
+    setProdottiEdit(prev => prev.map((p, i) =>
+      i === idx ? { ...p, nome_normalizzato: valore } : p
+    ));
+  };
+
+  const salvaModifiche = async () => {
+    if (!utente || !modalScontrino || isDemo) return;
+    setSalvataggioPending(true);
+    try {
+      // Salva su spese_personali/{uid}/scontrini/{id}
+      // Preserva nome_raw — sovrascrive solo nome_normalizzato
+      const ref = doc(db, 'spese_personali', utente.uid, 'scontrini', modalScontrino.id);
+      await updateDoc(ref, { prodotti: prodottiEdit });
+      // Aggiorna la copia locale nello scontrino aperto
+      setModalScontrino(prev => ({ ...prev, prodotti: prodottiEdit }));
+    } catch (err) {
+      console.error('Errore salvataggio:', err);
+    } finally {
+      setSalvataggioPending(false);
+    }
+  };
 
   // A2: filtro per insegna
   const [filtroInsegna, setFiltroInsegna] = useState(null);
@@ -3696,8 +3777,9 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
             const nProd = s.prodotti?.length || 0;
             return (
               <div key={s.id}
-                className="flex items-center px-5 py-3.5 active:bg-stone-50 transition-colors"
-                style={{ borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
+                className="flex items-center px-5 py-3.5 active:bg-stone-50 transition-colors cursor-pointer"
+                style={{ borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}
+                onClick={() => apriModalScontrino(s)}>
                 <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mr-3"
                   style={{ background: '#EEF2E4' }}>
                   <Receipt size={16} strokeWidth={1.5} style={{ color: T.primary }} />
@@ -3708,9 +3790,12 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
                     {dataFmt} · {nProd} prodott{nProd === 1 ? 'o' : 'i'}
                   </p>
                 </div>
-                <p className="text-sm font-semibold ml-3 shrink-0" style={{ color: T.textPrimary, fontFamily: "'Lora', serif" }}>
-                  {formattaPrezzo(s.totale_scontrino)}
-                </p>
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold shrink-0" style={{ color: T.textPrimary, fontFamily: "'Lora', serif" }}>
+                    {formattaPrezzo(s.totale_scontrino)}
+                  </p>
+                  <ChevronRight size={14} strokeWidth={1.5} style={{ color: T.textSec }} />
+                </div>
               </div>
             );
           })}
@@ -3734,6 +3819,152 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
         )}
 
       </div>
+
+      {/* ── Sprint 2: Modal drill-down scontrino con editing prodotti ── */}
+      {modalScontrino && (
+        <div className="fixed inset-0 z-50 flex flex-col" style={{ background: T.bg }}>
+
+          {/* Header modal */}
+          <div className="px-5 pt-10 pb-4 flex items-center gap-3 shrink-0"
+            style={{ background: T.primary, boxShadow: '0 2px 12px rgba(44,48,38,0.15)' }}>
+            <button onClick={chiudiModal} className="w-9 h-9 rounded-xl flex items-center justify-center"
+              style={{ background: 'rgba(255,255,255,0.15)' }}>
+              <X size={18} strokeWidth={2} style={{ color: '#fff' }} />
+            </button>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs uppercase tracking-wider mb-0.5" style={{ color: 'rgba(255,255,255,0.65)' }}>
+                {new Date(modalScontrino.data_acquisto).toLocaleDateString('it-IT', { day: '2-digit', month: 'long', year: 'numeric' })}
+              </p>
+              <h2 className="text-base font-semibold truncate" style={{ color: '#fff', fontFamily: "'Lora', serif" }}>
+                {modalScontrino.insegna}
+              </h2>
+            </div>
+            <div className="text-right shrink-0">
+              <p style={{ fontFamily: "'Lora', serif", fontSize: '20px', fontWeight: 500, color: '#fff' }}>
+                {formattaPrezzo(modalScontrino.totale_scontrino)}
+              </p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'rgba(255,255,255,0.65)' }}>
+                {prodottiEdit.length} prodotti
+              </p>
+            </div>
+          </div>
+
+          {/* Istruzione */}
+          <div className="px-5 py-3 shrink-0" style={{ background: '#EEF2E4', borderBottom: `1px solid ${T.border}` }}>
+            <p className="text-xs" style={{ color: T.primary }}>
+              ✏️ Tocca un prodotto per correggere il nome — il nome originale dello scontrino viene sempre conservato.
+            </p>
+          </div>
+
+          {/* Lista prodotti scrollabile */}
+          <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+            {prodottiEdit.map((p, idx) => {
+              const isSpecifico = !p.tipo_voce || p.tipo_voce === 'specifico';
+              const nomeRaw      = p.nome_raw || p.nome || '';
+              const nomeNorm     = p.nome_normalizzato || '';
+              const inEdit       = prodottoFocus === idx;
+
+              return (
+                <div key={idx}
+                  className="rounded-[16px] overflow-hidden"
+                  style={{ background: T.surface, border: `1px solid ${inEdit ? T.primary : T.border}`,
+                           boxShadow: inEdit ? `0 0 0 2px ${T.primary}22` : '0 2px 8px rgba(44,48,38,0.04)' }}>
+
+                  {/* Header prodotto */}
+                  <div className="flex items-center px-4 py-3 gap-3"
+                    onClick={() => setProdottoFocus(inEdit ? null : idx)}>
+                    <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
+                      style={{ background: isSpecifico ? '#EEF2E4' : '#F5F5F5' }}>
+                      <span style={{ fontSize: '12px' }}>{isSpecifico ? '🏷️' : '📦'}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      {/* Nome normalizzato (quello che l'utente vede/modifica) */}
+                      <p className="text-sm font-medium truncate" style={{ color: T.textPrimary }}>
+                        {nomeNorm || nomeRaw}
+                      </p>
+                      {/* Nome raw — sempre visibile se diverso */}
+                      {nomeRaw && nomeRaw !== nomeNorm && (
+                        <p className="text-[10px] mt-0.5 truncate" style={{ color: T.textSec }}>
+                          scontrino: <span className="font-mono">{nomeRaw}</span>
+                        </p>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0 ml-2">
+                      <p className="text-sm font-semibold" style={{ color: T.textPrimary, fontFamily: "'Lora', serif" }}>
+                        {p.prezzo_unitario != null ? formattaPrezzo(p.prezzo_unitario) : '—'}
+                      </p>
+                      {p.quantita > 1 && (
+                        <p className="text-[10px]" style={{ color: T.textSec }}>×{p.quantita}</p>
+                      )}
+                    </div>
+                    <ChevronRight size={14} strokeWidth={1.5}
+                      className={`shrink-0 transition-transform ${inEdit ? 'rotate-90' : ''}`}
+                      style={{ color: T.textSec }} />
+                  </div>
+
+                  {/* Pannello editing — espanso al click */}
+                  {inEdit && (
+                    <div className="px-4 pb-4 space-y-3" style={{ borderTop: `1px solid ${T.border}` }}>
+                      <div className="pt-3">
+                        <label className="block text-[10px] uppercase font-semibold mb-1.5" style={{ color: T.primary }}>
+                          Nome corretto
+                        </label>
+                        <input
+                          type="text"
+                          value={nomeNorm}
+                          onChange={e => aggiornaNomeNorm(idx, e.target.value)}
+                          placeholder={nomeRaw}
+                          autoFocus
+                          className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+                          style={{ background: T.bg, border: `1px solid ${T.primary}`, color: T.textPrimary }}
+                        />
+                        <p className="text-[10px] mt-1.5" style={{ color: T.textSec }}>
+                          Nome originale: <span className="font-mono">{nomeRaw || '—'}</span>
+                        </p>
+                      </div>
+                      {/* Info extra in sola lettura */}
+                      {(p.categoria || p.marca) && (
+                        <div className="flex gap-2 flex-wrap">
+                          {p.categoria && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-md"
+                              style={{ background: '#EEF2E4', color: T.primary }}>
+                              {p.categoria}
+                            </span>
+                          )}
+                          {p.marca && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-md"
+                              style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                              {p.marca}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Footer con bottone salva */}
+          <div className="px-5 py-4 shrink-0" style={{ borderTop: `1px solid ${T.border}`, background: T.surface }}>
+            <button
+              onClick={salvaModifiche}
+              disabled={salvataggioPending}
+              className="w-full py-3.5 rounded-[18px] text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+              style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+              {salvataggioPending
+                ? <><Loader size={16} strokeWidth={1.5} className="animate-spin" /> Salvo...</>
+                : <><Check size={16} strokeWidth={2} /> Salva correzioni</>}
+            </button>
+            <p className="text-[10px] text-center mt-2" style={{ color: T.textSec }}>
+              Il nome originale dello scontrino non viene mai cancellato
+            </p>
+          </div>
+
+        </div>
+      )}
+
     </div>
   );
 };
