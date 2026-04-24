@@ -1292,7 +1292,7 @@ const TabScontrino = () => {
   const inputRef = React.useRef(null);
   const inputVolRef = React.useRef(null);
   const MAX_FOTO = 4;
-  const MAX_FOTO_VOL = 8;
+  const MAX_FOTO_VOL = 30;
 
   // A1: carica scontrini in attesa all'apertura del tab
   useEffect(() => {
