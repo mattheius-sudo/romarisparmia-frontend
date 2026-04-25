@@ -41,6 +41,29 @@ import {
   Flag,
 } from 'lucide-react';
 
+// ── ErrorBoundary per debug crash schermo bianco ─────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: '20px', background: '#FEE2E2', minHeight: '100vh' }}>
+          <h2 style={{ color: '#DC2626', fontFamily: 'monospace', fontSize: '14px' }}>
+            💥 ERRORE REACT
+          </h2>
+          <pre style={{ color: '#7F1D1D', fontSize: '11px', whiteSpace: 'pre-wrap', marginTop: '8px' }}>
+            {this.state.error?.message}\n\n{this.state.error?.stack?.slice(0, 500)}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+
+
 // ─── Font import (Lora + DM Sans via Google Fonts) ───────────────────────────
 // Aggiunto nel <head> di index.html — qui solo il riferimento per chiarezza:
 // <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -6406,7 +6429,7 @@ function AppInterna() {
         />
       )}
 
-      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}>
+      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}><ErrorBoundary>
         {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
         {activeTab === 'lista'      && (utente
           ? <TabListaSpesa offerte={offerte} archivio={archivio} />
@@ -6427,7 +6450,7 @@ function AppInterna() {
           ? <TabProfilo />
           : <TabLoginRichiesto messaggio="Accedi per vedere il tuo profilo, i tuoi punti e il tuo livello." />
         )}
-      </div>
+      </ErrorBoundary></div>
 
       {/* Banner aggiornamento PWA */}
       {swUpdateAvailable && (
