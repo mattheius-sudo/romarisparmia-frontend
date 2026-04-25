@@ -2856,26 +2856,21 @@ const CATEGORIE_EMOJI = {
 };
 
 const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
-  const [vista, setVista] = useState('highlights');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [categoriaAttiva, setCategoriaAttiva] = useState(null);
-  const [ordinamento, setOrdinamento] = useState('prezzo_asc');
-  const [showOrdinamento, setShowOrdinamento] = useState(false);
-  const [filtroInsegna, setFiltroInsegna] = useState(null);
-
-  // ── Info pagamenti insegne (da info_insegne Firestore) ───────────────────
-  const [infoInsegne, setInfoInsegne] = useState({});  // { insegna: dati }
-  const [loadingInfo, setLoadingInfo] = useState(false);
-
-  // ── Store segnalazioni ────────────────────────────────────────────────────
+  const { prodottiPreferiti, isLoggedIn } = useAuth();
+  const [searchOpen,     setSearchOpen]     = useState(false);
+  const [searchQuery,    setSearchQuery]     = useState('');
+  const [catAttiva,      setCatAttiva]       = useState('tutte');
+  const [filtroInsegna,  setFiltroInsegna]   = useState(null);
+  const [infoAperte,     setInfoAperte]      = useState(false);
+  const [infoInsegne,    setInfoInsegne]     = useState({});
   const { segnalati, segnala } = useSegnalazioniStore();
+  const searchRef = React.useRef(null);
 
-  // ── Deduplicazione + filtro nascosto ─────────────────────────────────────
+  // ── Deduplicazione + filtro città ─────────────────────────────────────────
   const offerteDedup = useMemo(() => {
     const seen = new Map();
     offerte.forEach(o => {
       if (o.nascosto) return;
-      // Filtra per città se l'utente ne ha una impostata
       if (cittàAttiva && o.città && o.città !== cittàAttiva) return;
       const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
       if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
@@ -2883,23 +2878,77 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
     return [...seen.values()].filter(o => !o.valido_fino || o.valido_fino >= OGGI);
   }, [offerte, cittàAttiva]);
 
-  // ── Insegne disponibili per il chip-filter ────────────────────────────────
-  const insegneOfferte = useMemo(() =>
+  // ── Insegne disponibili ────────────────────────────────────────────────────
+  const insegneDisp = useMemo(() =>
     [...new Set(offerteDedup.map(o => o.insegna).filter(Boolean))].sort(),
     [offerteDedup]);
 
-  // ── Base filtrata per insegna — applicata a highlights, sfoglia e cerca ──
-  const offerteBase = useMemo(() =>
-    filtroInsegna ? offerteDedup.filter(o => o.insegna === filtroInsegna) : offerteDedup,
-    [offerteDedup, filtroInsegna]);
+  // ── Offerte filtrate per cat + insegna ────────────────────────────────────
+  const offerteFiltrate = useMemo(() => {
+    let res = offerteDedup;
+    if (catAttiva && catAttiva !== 'tutte') res = res.filter(o => o.categoria === catAttiva);
+    if (filtroInsegna) res = res.filter(o => o.insegna === filtroInsegna);
+    return res;
+  }, [offerteDedup, catAttiva, filtroInsegna]);
 
-  // ── Fetch info pagamenti quando cambiano le insegne disponibili ──────────
+  // ── Offerte urgenti (scadono oggi/domani) ─────────────────────────────────
+  const urgenti = useMemo(() =>
+    offerteDedup
+      .filter(o => o.valido_fino === OGGI || o.valido_fino === DOMANI)
+      .sort((a, b) => a.prezzo - b.prezzo)
+      .slice(0, 8),
+    [offerteDedup]);
+
+  // ── Matching prodotti preferiti ───────────────────────────────────────────
+  const offertePreferite = useMemo(() => {
+    const pref = prodottiPreferiti?.items || [];
+    if (!pref.length || !isLoggedIn) return [];
+    return offerteFiltrate.filter(o =>
+      pref.some(p => {
+        const nomeO = (o.nome || '').toLowerCase();
+        const nomeP = (p.nome || '').toLowerCase();
+        const marcaP = (p.marca || '').toLowerCase();
+        return nomeO.includes(nomeP) || (marcaP && (o.marca||'').toLowerCase().includes(marcaP));
+      })
+    ).slice(0, 8);
+  }, [offerteFiltrate, prodottiPreferiti, isLoggedIn]);
+
+  // Set id offerte preferite per badge rapido
+  const idPreferite = useMemo(() => new Set(offertePreferite.map(o => o.id)), [offertePreferite]);
+
+  // ── Ricerca ───────────────────────────────────────────────────────────────
+  const offerteSearch = useMemo(() => {
+    if (!searchQuery.trim()) return [];
+    const q = searchQuery.toLowerCase();
+    return offerteDedup.filter(o =>
+      (o.nome||'').toLowerCase().includes(q) ||
+      (o.marca||'').toLowerCase().includes(q) ||
+      (o.categoria||'').toLowerCase().includes(q)
+    ).slice(0, 40);
+  }, [offerteDedup, searchQuery]);
+
+  // ── Calcolo trend prezzi ──────────────────────────────────────────────────
+  const calcolaTrend = useCallback((o) => {
+    if (!archivio?.length) return null;
+    const storici = archivio
+      .filter(a => a.insegna === o.insegna &&
+        (a.nome?.toLowerCase() === o.nome?.toLowerCase() ||
+         a.nome_normalizzato?.toLowerCase() === o.nome?.toLowerCase()) && a.prezzo)
+      .sort((a, b) => (a.valido_fino||'').localeCompare(b.valido_fino||''))
+      .slice(-4);
+    if (!storici.length) return null;
+    const media = storici.reduce((s, a) => s + a.prezzo, 0) / storici.length;
+    const pct   = Math.abs(o.prezzo - media) / media;
+    if (pct < 0.03) return 'stabile';
+    return o.prezzo > media ? 'su' : 'giu';
+  }, [archivio]);
+
+  // ── Fetch info pagamenti ───────────────────────────────────────────────────
   useEffect(() => {
-    if (!insegneOfferte.length || !cittàAttiva) return;
+    if (!insegneDisp.length || !cittàAttiva || !infoAperte) return;
     let mounted = true;
-    setLoadingInfo(true);
     Promise.all(
-      insegneOfferte.map(async ins => {
+      insegneDisp.map(async ins => {
         const id   = `${cittàAttiva}_${ins.replace(/[^a-zA-Z0-9]/g, '_')}`;
         const snap = await getDoc(doc(db, 'info_insegne', id));
         return [ins, snap.exists() ? snap.data() : null];
@@ -2907,523 +2956,412 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
     ).then(entries => {
       if (!mounted) return;
       const mappa = {};
-      entries.forEach(([ins, dati]) => { if (dati?.dati) mappa[ins] = dati.dati; });
+      entries.forEach(([ins, d]) => { if (d?.dati) mappa[ins] = d.dati; });
       setInfoInsegne(mappa);
-    }).catch(() => {}).finally(() => { if (mounted) setLoadingInfo(false); });
+    }).catch(() => {});
     return () => { mounted = false; };
-  }, [insegneOfferte.join(','), cittàAttiva]);
+  }, [insegneDisp.join(','), cittàAttiva, infoAperte]);
 
-  // ── Calcola trend prezzo per un'offerta usando l'archivio ─────────────────
-  // Ritorna: 'su' | 'giu' | 'stabile' | null (dati insufficienti)
-  const calcolaTrend = useCallback((offerta) => {
-    if (!archivio?.length) return null;
-    const storici = archivio
-      .filter(a =>
-        a.insegna === offerta.insegna &&
-        (a.nome?.toLowerCase() === offerta.nome?.toLowerCase() ||
-         a.nome_normalizzato?.toLowerCase() === offerta.nome?.toLowerCase()) &&
-        a.prezzo
-      )
-      .sort((a, b) => (a.valido_fino || '').localeCompare(b.valido_fino || ''))
-      .slice(-4); // ultime 4 settimane
-    if (!storici.length) return null;
-    const prezzoStoricoMedio = storici.reduce((s, a) => s + a.prezzo, 0) / storici.length;
-    const diff = offerta.prezzo - prezzoStoricoMedio;
-    const pct  = Math.abs(diff) / prezzoStoricoMedio;
-    if (pct < 0.03) return 'stabile'; // meno del 3% — stabile
-    return diff > 0 ? 'su' : 'giu';
-  }, [archivio]);
+  // ── Helper: apre search e focus sull'input ─────────────────────────────────
+  const apriSearch = () => {
+    setSearchOpen(true);
+    setTimeout(() => searchRef.current?.focus(), 100);
+  };
 
-  // ── HIGHLIGHTS ────────────────────────────────────────────────────────────
-  const highlights = useMemo(() => {
-    // Sezione 1: in scadenza oggi o domani (urgenza)
-    const urgenti = offerteBase
-      .filter(o => o.valido_fino === OGGI || o.valido_fino === DOMANI)
-      .sort((a, b) => a.prezzo - b.prezzo)
-      .slice(0, 8);
+  const chiudiSearch = () => {
+    setSearchOpen(false);
+    setSearchQuery('');
+  };
 
-    // Sezione 2: top per categoria (il prodotto più economico di ogni categoria)
-    const catMap = {};
-    offerteBase.forEach(o => {
-      const cat = o.categoria || 'altro';
-      if (!catMap[cat] || catMap[cat].prezzo > o.prezzo) catMap[cat] = o;
-    });
-    const topCategorie = Object.values(catMap).sort((a,b) => a.prezzo - b.prezzo);
-
-    // Sezione 3: offerte con fidelity card (hidden gems)
-    const conTessera = offerteBase
-      .filter(o => o.fidelity_req)
-      .sort((a, b) => a.prezzo - b.prezzo)
-      .slice(0, 6);
-
-    return { urgenti, topCategorie, conTessera };
-  }, [offerteBase]);
-
-  // ── SFOGLIA: raggruppate per categoria o filtrate ─────────────────────────
-  const offerteSfoglia = useMemo(() => {
-    let base = categoriaAttiva
-      ? offerteDedup.filter(o => o.categoria === categoriaAttiva)
-      : offerteBase;
-    return [...base].sort((a, b) => {
-      if (ordinamento === 'prezzo_asc') return a.prezzo - b.prezzo;
-      if (ordinamento === 'prezzo_desc') return b.prezzo - a.prezzo;
-      if (ordinamento === 'prezzo_kg') return (a.prezzo_kg||999) - (b.prezzo_kg||999);
-      if (ordinamento === 'scadenza') return (a.valido_fino||'').localeCompare(b.valido_fino||'');
-      if (ordinamento === 'insegna') return (a.insegna||'').localeCompare(b.insegna||'');
-      return 0;
-    });
-  }, [offerteBase, categoriaAttiva, ordinamento]);
-
-  // ── CERCA ─────────────────────────────────────────────────────────────────
-  const offerteRicerca = useMemo(() => {
-    if (!searchQuery.trim()) return [];
-    const q = searchQuery.toLowerCase().trim();
-    return offerteBase
-      .filter(o =>
-        (o.nome||'').toLowerCase().includes(q) ||
-        (o.marca||'').toLowerCase().includes(q) ||
-        (o.insegna||'').toLowerCase().includes(q)
-      )
-      .sort((a, b) => a.prezzo - b.prezzo)
-      .slice(0, 60);
-  }, [offerteBase, searchQuery]);
-
-  // ── Categorie disponibili con conteggi ────────────────────────────────────
+  // ── Categorie con count ────────────────────────────────────────────────────
   const categorieConCount = useMemo(() => {
     const counts = {};
-    offerteBase.forEach(o => { const c = o.categoria || 'altro'; counts[c] = (counts[c]||0)+1; });
-    return Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-  }, [offerteBase]);
+    offerteDedup.forEach(o => { const c = o.categoria || 'altro'; counts[c] = (counts[c]||0)+1; });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [offerteDedup]);
 
-  // ── Cerca auto-switch ─────────────────────────────────────────────────────
-  const handleSearch = (v) => {
-    setSearchQuery(v);
-    if (v.trim()) setVista('cerca');
-    else if (vista === 'cerca') setVista('highlights');
-  };
-
-  // ── Sezione highlights orizzontale scrollabile ────────────────────────────
-  const ScrollRow = ({ items, renderItem }) => (
-    <div className="flex overflow-x-auto hide-scrollbar gap-3 px-4 pb-1">
-      {items.map((item, i) => renderItem(item, i))}
-    </div>
-  );
-
-  // Card piccola per scroll orizzontale
-  const MiniCard = ({ offerta }) => {
-    const giorni = calcGiorniRimanenti(offerta.valido_fino);
-    const isUrgente = giorni <= 2 && giorni >= 0;
-    return (
-      <div className="shrink-0 rounded-[16px] p-3.5 flex flex-col gap-1"
-        style={{ background: T.surface, border: `1px solid ${T.border}`, width: '140px',
-          boxShadow: '0 2px 12px rgba(44,48,38,0.07)' }}>
-        <div className="font-semibold" style={{ fontFamily: "'Lora', serif", fontSize: '20px', color: T.textPrimary }}>
-          {formattaPrezzo(offerta.prezzo)}
-        </div>
-        <p className="text-xs font-medium leading-snug line-clamp-2" style={{ color: T.textPrimary }}>
-          {offerta.nome}
-          {offerta.marca ? ` · ${offerta.marca}` : ''}
-        </p>
-        {offerta.grammatura && (
-          <p className="text-[10px]" style={{ color: T.textSec }}>{offerta.grammatura}</p>
-        )}
-        <div className="flex items-center justify-between mt-auto pt-1">
-          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-md ${getBadgeInsegna(offerta.insegna)}`}>
-            {offerta.insegna.split('/')[0]}
-          </span>
-          {isUrgente && (
-            <span className="text-[10px] font-bold" style={{ color: T.accent }}>
-              {giorni === 0 ? 'Oggi!' : `${giorni}gg`}
-            </span>
-          )}
-        </div>
-      </div>
-    );
-  };
+  const CAT_ITEMS = [
+    { id: 'tutte', label: 'Tutto', emoji: '🛒' },
+    ...CATEGORIE.filter(c => c.id !== 'tutte' && categorieConCount.some(([id]) => id === c.id)).map(c => ({
+      id:    c.id,
+      label: c.label,
+      emoji: CATEGORIE_EMOJI[c.id] || '📦',
+    })),
+  ];
 
   return (
     <div className="flex flex-col h-full" style={{ background: T.bg }}>
 
-      {/* ── Header sticky ── */}
-      <div className="safe-top sticky top-0 z-20 px-4 pt-5 pb-0"
-        data-tutorial="offerte-header"
-        style={{ background: 'rgba(249,248,244,0.92)', backdropFilter: 'blur(14px)', borderBottom: `1px solid ${T.border}` }}>
+      {/* ── HEADER STICKY ─────────────────────────────────────────────────── */}
+      <div className="safe-top shrink-0 z-20"
+        style={{ background: 'rgba(249,248,244,0.95)', backdropFilter: 'blur(16px)',
+                 borderBottom: `1px solid ${T.border}` }}>
 
-        {/* Logo + totale */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <IconaLenticchia size={20} style={{ color: T.primary }} />
-            <span style={{ fontFamily: "'Lora', serif", fontSize: '18px', fontWeight: 500, color: T.textPrimary }}>
+        {/* Riga 1: logo + search icon + contatore */}
+        <div className="flex items-center gap-3 px-4 pt-4 pb-2">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
+            <IconaLenticchia size={22} style={{ color: T.primary, flexShrink: 0 }} />
+            <span style={{ fontFamily: "'Lora', serif", fontSize: '18px',
+                           fontWeight: 500, color: T.textPrimary }}>
               Lenticchia
             </span>
           </div>
-          <span className="text-xs font-medium px-2.5 py-1 rounded-full"
-            style={{ background: '#EEF2E4', color: T.primary }}>
-            {offerteBase.length.toLocaleString('it-IT')} offerte
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs px-2 py-1 rounded-full font-medium"
+              style={{ background: '#EEF2E4', color: T.primary }}>
+              {offerteDedup.length.toLocaleString('it-IT')} offerte
+            </span>
+            <button onClick={apriSearch}
+              className="w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-90"
+              style={{ background: searchOpen ? T.primary : T.bg,
+                       border: `1px solid ${T.border}` }}>
+              <Search size={16} strokeWidth={1.5}
+                style={{ color: searchOpen ? '#fff' : T.textSec }} />
+            </button>
+          </div>
         </div>
 
-        {/* Search bar */}
-        <div className="relative mb-3">
-          <Search size={15} strokeWidth={1.5} className="absolute left-3.5 top-1/2 -translate-y-1/2" style={{ color: T.textSec }} />
-          <input
-            type="text"
-            className="w-full pl-9 pr-4 py-2.5 rounded-2xl text-base outline-none"
-            style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
-            placeholder="Cerca pasta, latte, carne..."
-            value={searchQuery}
-            onChange={e => handleSearch(e.target.value)}
-          />
-          {searchQuery && (
-            <button onClick={() => handleSearch('')}
-              className="absolute right-3 top-1/2 -translate-y-1/2"
+        {/* Search input — espansione animata */}
+        {searchOpen && (
+          <div className="px-4 pb-3 flex items-center gap-2">
+            <div className="flex-1 flex items-center gap-2 px-3 py-2.5 rounded-2xl"
+              style={{ background: T.surface, border: `1.5px solid ${T.primary}` }}>
+              <Search size={14} strokeWidth={1.5} style={{ color: T.textSec, flexShrink: 0 }} />
+              <input
+                ref={searchRef}
+                type="text"
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                placeholder="Cerca pasta, latte, carne..."
+                className="flex-1 text-base outline-none bg-transparent"
+                style={{ color: T.textPrimary }}
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery('')}
+                  style={{ color: T.textSec, flexShrink: 0 }}>
+                  <X size={14} strokeWidth={2} />
+                </button>
+              )}
+            </div>
+            <button onClick={chiudiSearch}
+              className="text-sm font-medium shrink-0"
               style={{ color: T.textSec }}>
-              <X size={14} strokeWidth={2} />
+              Annulla
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
-        {/* Vista tabs */}
-        <div className="flex gap-1 mb-0 pb-3">
-          {VISTA_ITEMS.map(v => (
-            <button key={v.id} onClick={() => setVista(v.id)}
-              className="px-3.5 py-1.5 rounded-full text-xs font-medium transition-all"
-              style={vista === v.id
-                ? { background: T.primary, color: '#fff' }
-                : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }
-              }>
-              {v.label}
-            </button>
-          ))}
-          {/* Ordinamento — solo in Sfoglia */}
-          {vista === 'sfoglia' && (
-            <div className="relative ml-auto">
-              <button onClick={() => setShowOrdinamento(v => !v)}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-full text-xs transition-all"
-                style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textSec }}>
-                <SlidersHorizontal size={11} strokeWidth={1.5} />
-                {ORDINAMENTI.find(o=>o.id===ordinamento)?.label}
-              </button>
-              {showOrdinamento && (
-                <div className="absolute right-0 top-9 rounded-2xl overflow-hidden z-50 w-32"
-                  style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 8px 30px rgba(44,48,38,0.12)' }}>
-                  {ORDINAMENTI.map(o => (
-                    <button key={o.id} onClick={() => { setOrdinamento(o.id); setShowOrdinamento(false); }}
-                      className="w-full text-left px-3 py-2 text-xs transition-colors hover:bg-stone-50"
-                      style={{ color: ordinamento === o.id ? T.primary : T.textPrimary, fontWeight: ordinamento === o.id ? 600 : 400 }}>
-                      {o.label}
-                    </button>
+        {/* Categorie JustEat style — solo se search chiusa */}
+        {!searchOpen && (
+          <>
+            {/* Riga categorie — emoji grande + label */}
+            <div className="flex gap-3 overflow-x-auto hide-scrollbar px-4 pb-2">
+              {CAT_ITEMS.map(c => {
+                const attiva = catAttiva === c.id;
+                return (
+                  <button key={c.id}
+                    onClick={() => setCatAttiva(c.id)}
+                    className="flex flex-col items-center gap-1 shrink-0 transition-all active:scale-95"
+                    style={{ minWidth: '56px' }}>
+                    <div className="w-14 h-14 rounded-2xl flex items-center justify-center transition-all"
+                      style={{
+                        background: attiva ? T.primary : T.surface,
+                        border:     `1.5px solid ${attiva ? T.primary : T.border}`,
+                        boxShadow:  attiva ? '0 4px 12px rgba(100,113,68,0.25)' : '0 2px 6px rgba(44,48,38,0.06)',
+                      }}>
+                      <span style={{ fontSize: '26px', lineHeight: 1 }}>{c.emoji}</span>
+                    </div>
+                    <span className="text-[10px] font-medium text-center leading-tight"
+                      style={{ color: attiva ? T.primary : T.textSec, maxWidth: '56px' }}>
+                      {c.label}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Riga insegne — chip piccole */}
+            {insegneDisp.length > 1 && (
+              <div className="flex gap-2 overflow-x-auto hide-scrollbar px-4 pb-3">
+                <button onClick={() => setFiltroInsegna(null)}
+                  className="px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition-all"
+                  style={!filtroInsegna
+                    ? { background: T.textPrimary, color: '#fff' }
+                    : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
+                  Tutti
+                </button>
+                {insegneDisp.map(ins => (
+                  <button key={ins}
+                    onClick={() => setFiltroInsegna(ins === filtroInsegna ? null : ins)}
+                    className="px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition-all"
+                    style={filtroInsegna === ins
+                      ? { background: T.textPrimary, color: '#fff' }
+                      : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
+                    {ins.split('/')[0].trim()}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* ── CORPO SCROLLABILE ──────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto hide-scrollbar pb-4">
+
+        {/* ── VISTA SEARCH ────────────────────────────────────────────────── */}
+        {searchOpen && (
+          <div className="px-4 pt-4">
+            {!searchQuery.trim() ? (
+              <p className="text-sm text-center py-8" style={{ color: T.textSec }}>
+                Inizia a scrivere per cercare
+              </p>
+            ) : offerteSearch.length === 0 ? (
+              <p className="text-sm text-center py-8" style={{ color: T.textSec }}>
+                Nessuna offerta trovata per "{searchQuery}"
+              </p>
+            ) : (
+              <div className="rounded-[20px] overflow-hidden"
+                style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+                {offerteSearch.map((o, i) => (
+                  <ProductCardCompatta key={o.id||i} offerta={o} index={i}
+                    segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── VISTA NORMALE ───────────────────────────────────────────────── */}
+        {!searchOpen && (
+          <>
+            {/* Sezione ⭐ Per te — solo se loggato con preferiti in offerta */}
+            {offertePreferite.length > 0 && (
+              <div className="pt-5 pb-2">
+                <div className="flex items-center justify-between px-4 mb-3">
+                  <h2 className="text-sm font-semibold" style={{ color: T.textPrimary }}>
+                    ⭐ Per te
+                  </h2>
+                  <span className="text-[11px]" style={{ color: T.textSec }}>
+                    dai tuoi preferiti
+                  </span>
+                </div>
+                <div className="flex gap-3 overflow-x-auto hide-scrollbar px-4 pb-1">
+                  {offertePreferite.map((o, i) => (
+                    <div key={o.id||i}
+                      className="shrink-0 rounded-[18px] overflow-hidden"
+                      style={{ width: '160px', background: '#EEF2E4',
+                               border: `1.5px solid ${T.primary}`,
+                               boxShadow: '0 4px 12px rgba(100,113,68,0.15)' }}>
+                      {/* Badge preferito */}
+                      <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide"
+                          style={{ color: T.primary }}>
+                          {o.insegna?.split('/')[0]}
+                        </span>
+                        <span style={{ fontSize: '12px' }}>⭐</span>
+                      </div>
+                      <div className="px-3 pb-3">
+                        <p className="text-xs font-medium leading-snug mb-1"
+                          style={{ color: T.textPrimary }}>
+                          {o.nome}
+                        </p>
+                        {o.marca && (
+                          <p className="text-[10px] mb-1.5" style={{ color: T.textSec }}>
+                            {o.marca}
+                          </p>
+                        )}
+                        <div className="flex items-end justify-between">
+                          <span style={{ fontFamily: "'Lora', serif", fontSize: '20px',
+                                         fontWeight: 600, color: T.primary }}>
+                            {formattaPrezzo(o.prezzo)}
+                          </span>
+                          {(() => {
+                            const t = calcolaTrend(o);
+                            if (t === 'giu') return <TrendingDown size={14} style={{ color: '#16a34a' }} />;
+                            if (t === 'su')  return <TrendingUp size={14} style={{ color: '#dc2626' }} />;
+                            return null;
+                          })()}
+                        </div>
+                        {o.grammatura && (
+                          <p className="text-[10px] mt-0.5" style={{ color: T.textSec }}>
+                            {o.grammatura}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Sezione ⏰ Scadono presto */}
+            {urgenti.length > 0 && (
+              <div className={offertePreferite.length > 0 ? 'pt-2 pb-2' : 'pt-5 pb-2'}>
+                <div className="flex items-center justify-between px-4 mb-3">
+                  <h2 className="text-sm font-semibold" style={{ color: T.textPrimary }}>
+                    ⏰ Scadono presto
+                  </h2>
+                  <span className="text-[11px]" style={{ color: T.accent }}>
+                    oggi o domani
+                  </span>
+                </div>
+                <div className="flex gap-3 overflow-x-auto hide-scrollbar px-4 pb-1">
+                  {urgenti.map((o, i) => (
+                    <div key={o.id||i}
+                      className="shrink-0 rounded-[18px] overflow-hidden"
+                      style={{ width: '140px', background: T.surface,
+                               border: `1.5px solid ${T.border}`,
+                               boxShadow: '0 2px 8px rgba(44,48,38,0.07)' }}>
+                      <div className="flex items-center justify-between px-3 pt-2.5 pb-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wide"
+                          style={{ color: T.textSec }}>
+                          {o.insegna?.split('/')[0]}
+                        </span>
+                        <span className="text-[10px] font-bold"
+                          style={{ color: T.accent }}>
+                          {o.valido_fino === OGGI ? 'oggi!' : 'domani'}
+                        </span>
+                      </div>
+                      <div className="px-3 pb-3">
+                        <p className="text-[11px] font-medium leading-snug mb-1.5"
+                          style={{ color: T.textPrimary }}>
+                          {o.nome}
+                        </p>
+                        <span style={{ fontFamily: "'Lora', serif", fontSize: '18px',
+                                       fontWeight: 600, color: T.textPrimary }}>
+                          {formattaPrezzo(o.prezzo)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* ── Lista principale offerte ─────────────────────────────── */}
+            <div className="px-4 pt-4">
+              {/* Intestazione lista */}
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold" style={{ color: T.textPrimary }}>
+                  {catAttiva === 'tutte' && !filtroInsegna
+                    ? 'Tutte le offerte'
+                    : [CAT_ITEMS.find(c=>c.id===catAttiva)?.label, filtroInsegna].filter(Boolean).join(' · ')}
+                </h2>
+                <span className="text-[11px]" style={{ color: T.textSec }}>
+                  {offerteFiltrate.length} prodott{offerteFiltrate.length === 1 ? 'o' : 'i'}
+                </span>
+              </div>
+
+              {offerteFiltrate.length === 0 ? (
+                <div className="rounded-[20px] py-12 text-center"
+                  style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+                  <p className="text-sm" style={{ color: T.textSec }}>
+                    Nessuna offerta {catAttiva !== 'tutte' ? 'in questa categoria' : ''}{filtroInsegna ? ` da ${filtroInsegna}` : ''} questa settimana
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-[20px] overflow-hidden"
+                  style={{ background: T.surface, border: `1px solid ${T.border}`,
+                           boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
+                  {offerteFiltrate.map((o, i) => (
+                    <div key={o.id||i} className="relative">
+                      {/* Badge ⭐ se è un preferito */}
+                      {idPreferite.has(o.id) && (
+                        <span className="absolute top-2 right-10 z-10 text-[10px] font-bold"
+                          style={{ color: T.primary }}>
+                          ⭐
+                        </span>
+                      )}
+                      <ProductCardCompatta
+                        offerta={o} index={i}
+                        segnalati={segnalati} segnala={segnala}
+                        trend={calcolaTrend(o)}
+                      />
+                    </div>
                   ))}
                 </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* Filtro per insegna — chip scrollabili */}
-        {insegneOfferte.length > 1 && (
-          <div className="flex gap-2 overflow-x-auto hide-scrollbar px-4 py-2.5"
-            data-tutorial="filtro-insegna"
-            style={{ borderBottom: `1px solid ${T.border}`, background: 'rgba(249,248,244,0.92)', backdropFilter: 'blur(14px)' }}>
-            <button
-              onClick={() => setFiltroInsegna(null)}
-              className="px-3.5 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
-              style={!filtroInsegna
-                ? { background: T.primary, color: '#fff' }
-                : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
-              Tutti
-            </button>
-            {insegneOfferte.map(ins => (
-              <button key={ins}
-                onClick={() => setFiltroInsegna(ins === filtroInsegna ? null : ins)}
-                className="px-3.5 py-1 rounded-full text-xs font-medium shrink-0 transition-all"
-                style={filtroInsegna === ins
-                  ? { background: T.primary, color: '#fff' }
-                  : { background: T.surface, color: T.textSec, border: `1px solid ${T.border}` }}>
-                {ins.split('/')[0].trim()}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* ── CONTENUTO ── */}
-      <div className="flex-1 overflow-y-auto pb-32 hide-scrollbar">
-
-        {/* ════ VISTA: HIGHLIGHTS ════ */}
-        {vista === 'highlights' && (
-          <div className="py-4 space-y-6">
-
-            {/* Scadono a breve */}
-            {highlights.urgenti.length > 0 && (
-              <div>
-                <div className="flex items-center justify-between px-4 mb-3">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: T.textSec }}>
-                    ⏰ Scadono presto
-                  </h2>
-                  <button onClick={() => { setCategoriaAttiva(null); setOrdinamento('scadenza'); setVista('sfoglia'); }}
-                    className="text-xs" style={{ color: T.primary }}>
-                    Tutte →
-                  </button>
+            {/* ── 💳 Pagamenti & promozioni — collassabile ────────────── */}
+            <div className="px-4 pt-6 pb-2">
+              <button
+                onClick={() => setInfoAperte(p => !p)}
+                className="w-full flex items-center justify-between px-5 py-4 rounded-[20px] transition-all active:scale-[0.99]"
+                style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+                <div className="flex items-center gap-3">
+                  <span style={{ fontSize: '20px' }}>💳</span>
+                  <span className="text-sm font-semibold" style={{ color: T.textPrimary }}>
+                    Pagamenti & promozioni
+                  </span>
                 </div>
-                <ScrollRow items={highlights.urgenti} renderItem={(o, i) => <MiniCard key={o.id || i} offerta={o} />} />
-              </div>
-            )}
+                <ChevronRight size={18} strokeWidth={1.5}
+                  className="transition-transform duration-300"
+                  style={{ color: T.textSec, transform: infoAperte ? 'rotate(90deg)' : 'rotate(0deg)' }} />
+              </button>
 
-            {/* Pagamenti & promozioni per insegna */}
-            {(() => {
-              const insegneConInfo = insegneOfferte.filter(ins => infoInsegne[ins]);
-              if (!insegneOfferte.length) return null;
-              return (
-                <div>
-                  <div className="flex items-center justify-between px-4 mb-3">
-                    <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: T.textSec }}>
-                      💳 Pagamenti & promozioni
-                    </h2>
-                    {insegneConInfo.length === 0 && !loadingInfo && (
-                      <span className="text-[10px]" style={{ color: T.textSec }}>
-                        Nessuna info ancora
-                      </span>
-                    )}
-                  </div>
-
-                  {insegneConInfo.length > 0 ? (
-                    <div className="space-y-2 px-4">
-                      {insegneConInfo.map(ins => {
-                        const d = infoInsegne[ins];
-                        const accettaBuoni  = d.buoni_pasto?.accettati;
-                        const circuiti      = d.buoni_pasto?.circuiti || [];
-                        const promoFlat     = d.promozioni_flat || [];
-                        const pagamentiOk   = Object.entries(d.pagamenti || {})
-                          .filter(([k, v]) => v && k !== 'contanti')
-                          .map(([k]) => ({ bancomat: '💳', carta: '💳', contactless: '📱', satispay: '🟡' }[k] || ''))
-                          .filter(Boolean);
-
-                        return (
-                          <div key={ins}
-                            className="rounded-[16px] px-4 py-3"
-                            style={{ background: T.surface, border: `1px solid ${T.border}` }}>
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-semibold mb-1.5" style={{ color: T.textPrimary }}>
-                                  {ins}
-                                </p>
-                                {/* Buoni pasto */}
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium"
-                                    style={accettaBuoni
-                                      ? { background: '#EEF2E4', color: T.primary }
-                                      : { background: '#FEE2E2', color: '#DC2626' }}>
-                                    🎟️ {accettaBuoni ? 'Buoni sì' : 'Buoni no'}
-                                  </span>
-                                  {accettaBuoni && circuiti.slice(0, 2).map(c => (
-                                    <span key={c} className="text-[10px] px-1.5 py-0.5 rounded-full"
-                                      style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
-                                      {c}
-                                    </span>
-                                  ))}
-                                  {accettaBuoni && circuiti.length > 2 && (
-                                    <span className="text-[10px]" style={{ color: T.textSec }}>
-                                      +{circuiti.length - 2}
-                                    </span>
-                                  )}
-                                </div>
-                                {/* Promozioni flat */}
-                                {promoFlat.slice(0, 2).map((p, i) => (
-                                  <p key={i} className="text-[11px] mt-1" style={{ color: T.textSec }}>
-                                    📅 {p.regola}
-                                  </p>
-                                ))}
-                              </div>
-                              {/* Metodi pagamento */}
-                              {pagamentiOk.length > 0 && (
-                                <div className="flex gap-1 shrink-0">
-                                  {[...new Set(pagamentiOk)].map((emoji, i) => (
-                                    <span key={i} style={{ fontSize: '16px' }}>{emoji}</span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
+              {infoAperte && (
+                <div className="mt-3 space-y-2">
+                  {insegneDisp.filter(ins => infoInsegne[ins]).length === 0 ? (
+                    <div className="rounded-[16px] px-4 py-4 text-center"
+                      style={{ background: T.bg, border: `1px dashed ${T.border}` }}>
+                      <p className="text-sm" style={{ color: T.textSec }}>
+                        Nessuna info ancora — aiutaci ad aggiungerle!
+                      </p>
+                      <p className="text-xs mt-1" style={{ color: T.textSec }}>
+                        Apri la scheda di un supermercato per contribuire
+                      </p>
                     </div>
                   ) : (
-                    /* Nessuna info — invito a contribuire */
-                    !loadingInfo && (
-                      <div className="mx-4 rounded-[16px] px-4 py-4 text-center"
-                        style={{ background: T.bg, border: `1px dashed ${T.border}` }}>
-                        <p className="text-sm mb-1" style={{ color: T.textSec }}>
-                          Nessuna info sui pagamenti ancora
-                        </p>
-                        <p className="text-xs" style={{ color: T.textSec }}>
-                          Apri la scheda di un supermercato nel tab Sfoglia per aggiungere info su buoni pasto e promozioni.
-                        </p>
-                      </div>
-                    )
+                    insegneDisp.filter(ins => infoInsegne[ins]).map(ins => {
+                      const d          = infoInsegne[ins];
+                      const buoni      = d.buoni_pasto?.accettati;
+                      const circuiti   = d.buoni_pasto?.circuiti || [];
+                      const promoFlat  = d.promozioni_flat || [];
+                      return (
+                        <div key={ins} className="rounded-[16px] px-4 py-3"
+                          style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold mb-1.5" style={{ color: T.textPrimary }}>
+                                {ins}
+                              </p>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                                  style={buoni
+                                    ? { background: '#EEF2E4', color: T.primary }
+                                    : { background: '#FEE2E2', color: '#DC2626' }}>
+                                  🎟️ {buoni ? 'Buoni sì' : 'Buoni no'}
+                                </span>
+                                {buoni && circuiti.slice(0, 2).map(c => (
+                                  <span key={c} className="text-[10px] px-1.5 py-0.5 rounded-full"
+                                    style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                                    {c}
+                                  </span>
+                                ))}
+                              </div>
+                              {promoFlat.slice(0, 2).map((p, i) => (
+                                <p key={i} className="text-[11px] mt-1" style={{ color: T.textSec }}>
+                                  📅 {p.regola}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
-              );
-            })()}
-
-            {/* Con tessera fedeltà */}
-            {highlights.conTessera.length > 0 && (
-              <div>
-                <div className="flex items-center justify-between px-4 mb-3">
-                  <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: T.textSec }}>
-                    ⭐ Con carta fedeltà
-                  </h2>
-                  <button onClick={() => { setCategoriaAttiva(null); setVista('sfoglia'); }}
-                    className="text-xs" style={{ color: T.primary }}>
-                    Tutte →
-                  </button>
-                </div>
-                <div className="px-4 rounded-[20px] overflow-hidden mx-4"
-                  style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
-                  {highlights.conTessera.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ════ VISTA: SFOGLIA ════ */}
-        {vista === 'sfoglia' && (
-          <div>
-            {/* Griglia categorie (se nessuna selezionata) */}
-            {!categoriaAttiva ? (
-              <div className="p-4 space-y-4">
-                <div className="grid grid-cols-2 gap-2.5">
-                  {categorieConCount.map(([cat, count]) => (
-                    <button key={cat}
-                      onClick={() => setCategoriaAttiva(cat)}
-                      className="flex items-center gap-3 p-4 rounded-[16px] text-left active:scale-[0.98] transition-all"
-                      style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 10px rgba(44,48,38,0.05)' }}>
-                      <span style={{ fontSize: '24px' }}>{CATEGORIE_EMOJI[cat] || '📦'}</span>
-                      <div>
-                        <p className="text-sm font-medium leading-tight" style={{ color: T.textPrimary }}>
-                          {CATEGORIE.find(c=>c.id===cat)?.label || cat}
-                        </p>
-                        <p className="text-xs mt-0.5" style={{ color: T.textSec }}>{count} offerte</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              /* Lista prodotti categoria selezionata */
-              <div>
-                {/* Header categoria */}
-                <div className="flex items-center gap-3 px-4 py-3 sticky top-0 z-10"
-                  style={{ background: 'rgba(249,248,244,0.95)', backdropFilter: 'blur(8px)', borderBottom: `1px solid ${T.border}` }}>
-                  <button onClick={() => setCategoriaAttiva(null)}
-                    className="p-1.5 rounded-full"
-                    style={{ background: T.surface, border: `1px solid ${T.border}` }}>
-                    <ArrowLeft size={16} strokeWidth={1.5} style={{ color: T.textPrimary }} />
-                  </button>
-                  <span style={{ fontSize: '20px' }}>{CATEGORIE_EMOJI[categoriaAttiva] || '📦'}</span>
-                  <div>
-                    <p className="font-medium text-sm" style={{ color: T.textPrimary }}>
-                      {CATEGORIE.find(c=>c.id===categoriaAttiva)?.label || categoriaAttiva}
-                    </p>
-                    <p className="text-xs" style={{ color: T.textSec }}>{offerteSfoglia.length} offerte</p>
-                  </div>
-                </div>
-
-                <div className="rounded-[0px] overflow-hidden"
-                  style={{ background: T.surface }}>
-                  {offerteSfoglia.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ════ VISTA: CERCA ════ */}
-        {vista === 'cerca' && (
-          <div>
-            {!searchQuery.trim() ? (
-              <div className="text-center py-20 px-8">
-                <Search size={36} strokeWidth={1} className="mx-auto mb-4" style={{ color: T.border }} />
-                <p className="font-medium" style={{ color: T.textPrimary }}>Cosa stai cercando?</p>
-                <p className="text-sm mt-1" style={{ color: T.textSec }}>Digita il nome di un prodotto, marca o negozio</p>
-              </div>
-            ) : offerteRicerca.length === 0 ? (
-              <div className="text-center py-20 px-8">
-                <p className="font-medium" style={{ color: T.textPrimary }}>Nessun risultato per "{searchQuery}"</p>
-                <p className="text-sm mt-1" style={{ color: T.textSec }}>Prova con un termine più generico</p>
-              </div>
-            ) : (
-              <div>
-                <p className="px-4 py-2.5 text-xs font-medium uppercase tracking-wider"
-                  style={{ color: T.textSec, borderBottom: `1px solid ${T.border}` }}>
-                  {offerteRicerca.length} risultati per "{searchQuery}"
-                  {offerteRicerca.length === 60 && ' (mostrando i 60 più economici)'}
-                </p>
-                <div style={{ background: T.surface }}>
-                  {offerteRicerca.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>
   );
 };
 
-// ─── Tab Lista Spesa ──────────────────────────────────────────────────────────
-
-// Normalizza una stringa di lista per confronto/deduplicazione
-const normalizzaLista = (items) =>
-  [...items].map(i => i.toLowerCase().trim()).sort().join('|');
-
-const LISTA_INIT = {
-  budgetInput:     '',
-  budgetEditing:   false,
-  listaText:       (() => {
-    try {
-      const params  = new URLSearchParams(window.location.search);
-      const listaUrl = params.get('lista');
-      if (listaUrl) {
-        const url = new URL(window.location.href);
-        url.searchParams.delete('lista');
-        window.history.replaceState({}, '', url.toString());
-        return decodeURIComponent(listaUrl).split(',').join('\n');
-      }
-    } catch {}
-    try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; }
-    catch { return ''; }
-  })(),
-  risultato:       null,
-  isAnalyzing:     false,
-  copiatoFeedback: false,
-  vistaStorico:    false,
-  storicoListe:    (() => { try { return JSON.parse(localStorage.getItem('lenticchia_storico_v2') || '[]'); } catch { return []; } })(),
-  listaCaricata:   false,
-};
-
-function listaReducer(state, action) {
-  switch (action.type) {
-    case 'SET_BUDGET_INPUT':    return { ...state, budgetInput: action.payload };
-    case 'SET_BUDGET_EDITING':  return { ...state, budgetEditing: action.payload };
-    case 'SET_LISTA_TEXT':      return { ...state, listaText: action.payload };
-    case 'SET_RISULTATO':       return { ...state, risultato: action.payload };
-    case 'SET_ANALYZING':       return { ...state, isAnalyzing: action.payload };
-    case 'SET_COPIATO':         return { ...state, copiatoFeedback: action.payload };
-    case 'SET_VISTA_STORICO':   return { ...state, vistaStorico: action.payload };
-    case 'SET_STORICO':         return { ...state, storicoListe: action.payload };
-    case 'SET_LISTA_CARICATA':  return { ...state, listaCaricata: action.payload };
-    case 'RESET_BUDGET':        return { ...state, budgetInput: '', budgetEditing: false };
-    default:                    return state;
-  }
-}
 
 const TabListaSpesa = ({ offerte, archivio = [] }) => {
   const { isLoggedIn, listaSpesa, aggiornaListaSpesa, preferenze, aggiornaPreferenze, prodottiPreferiti } = useAuth();
@@ -6412,7 +6350,7 @@ function AppInterna() {
         />
       )}
 
-      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 6.5rem)' }}>
+      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}>
         {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
         {activeTab === 'lista'      && (utente
           ? <TabListaSpesa offerte={offerte} archivio={archivio} />
@@ -6435,9 +6373,9 @@ function AppInterna() {
         )}
       </div>
 
-      {/* Banner aggiornamento PWA — appare quando il SW segnala una nuova versione */}
+      {/* Banner aggiornamento PWA */}
       {swUpdateAvailable && (
-        <div className="absolute bottom-24 left-4 right-4 z-50 rounded-[16px] px-4 py-3 flex items-center gap-3"
+        <div className="fixed bottom-20 left-4 right-4 z-50 rounded-[16px] px-4 py-3 flex items-center gap-3"
           style={{ background: T.primary, boxShadow: '0 8px 24px rgba(100,113,68,0.4)' }}>
           <span className="text-base">🌿</span>
           <p className="flex-1 text-xs font-medium text-white leading-tight">
@@ -6457,37 +6395,91 @@ function AppInterna() {
         </div>
       )}
 
-      {/* Floating pill navbar — centrata con absolute dentro il wrapper relativo */}
-      <div
-        className="absolute bottom-5 flex justify-around items-center z-50"
+      {/* ── Navbar fissa in fondo — stile app nativa ── */}
+      <nav
+        className="fixed bottom-0 left-0 right-0 z-50 flex items-stretch"
         style={{
-          left: '1rem',
-          right: '1rem',
-          background: T.textPrimary,
-          borderRadius: '999px',
-          boxShadow: '0 8px 32px rgba(44,48,38,0.35), 0 2px 8px rgba(44,48,38,0.15)',
-          padding: '10px 8px',
+          background:    T.surface,
+          borderTop:     `1px solid ${T.border}`,
+          paddingBottom: 'env(safe-area-inset-bottom)',
+          boxShadow:     '0 -4px 20px rgba(44,48,38,0.08)',
+          // Centra la nav dentro il max-width dell'app
+          maxWidth:      '448px',
+          margin:        '0 auto',
         }}
       >
-        {NAV_ITEMS.map(item => (
-          <button
-            key={item.id}
-            onClick={() => setActiveTab(item.id)}
-            data-tutorial={item.dataTutorial || undefined}
-            className="flex flex-col items-center justify-center rounded-full transition-all active:scale-90"
-            style={{
-              color: activeTab === item.id ? '#fff' : 'rgba(255,255,255,0.4)',
-              minWidth: '60px',
-              padding: '6px 8px',
-            }}
-          >
-            {item.icon}
-            <span style={{ fontSize: '11px', marginTop: '4px', fontWeight: 500, letterSpacing: '0.02em' }}>
-              {item.label}
-            </span>
-          </button>
-        ))}
-      </div>
+        {NAV_ITEMS.map(item => {
+          const isActive = activeTab === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              data-tutorial={item.dataTutorial || undefined}
+              className="flex-1 flex flex-col items-center justify-center gap-1 py-3 transition-all active:scale-95 relative"
+              style={{ minWidth: 0 }}
+            >
+              {/* Indicatore attivo — lineetta in cima */}
+              {isActive && (
+                <span
+                  className="absolute top-0 left-1/2 rounded-full"
+                  style={{
+                    width:       '24px',
+                    height:      '3px',
+                    background:  T.primary,
+                    transform:   'translateX(-50%)',
+                  }}
+                />
+              )}
+
+              {/* Icona */}
+              <span style={{
+                color:  isActive ? T.primary : T.textSec,
+                display: 'flex',
+                transition: 'color 0.15s',
+              }}>
+                {item.id === 'scontrino' ? (
+                  <div className="relative">
+                    <Camera size={22} strokeWidth={isActive ? 2 : 1.5} />
+                    {nDaValidare > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
+                        style={{ background: T.accent, color: '#fff' }}>
+                        {nDaValidare > 9 ? '9+' : nDaValidare}
+                      </span>
+                    )}
+                  </div>
+                ) : item.id === 'profilo' && utente?.photoURL ? (
+                  <img
+                    src={utente.photoURL}
+                    alt="avatar"
+                    className="w-6 h-6 rounded-full"
+                    style={{
+                      border: isActive ? `2px solid ${T.primary}` : `2px solid ${T.border}`,
+                      transition: 'border-color 0.15s',
+                    }}
+                  />
+                ) : (
+                  React.cloneElement(item.icon, {
+                    size:        22,
+                    strokeWidth: isActive ? 2 : 1.5,
+                  })
+                )}
+              </span>
+
+              {/* Label */}
+              <span style={{
+                fontSize:    '10px',
+                fontWeight:  isActive ? 600 : 400,
+                color:       isActive ? T.primary : T.textSec,
+                letterSpacing: '0.01em',
+                lineHeight:  1,
+                transition:  'color 0.15s, font-weight 0.15s',
+              }}>
+                {item.label}
+              </span>
+            </button>
+          );
+        })}
+      </nav>
 
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Lora:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap');
