@@ -39,7 +39,6 @@ import {
   Pencil,
   AlertTriangle,
   Flag,
-  MapPin
 } from 'lucide-react';
 
 // ─── Font import (Lora + DM Sans via Google Fonts) ───────────────────────────
@@ -285,43 +284,63 @@ const getProssimoLivello = (p = 0) => { const i = LIVELLI.findIndex(l => p < l.m
 const SOGLIA_SEGNALAZIONI = 3;
 
 const useSegnalazioniStore = () => {
-  // Set dei docId già segnalati in questa sessione (per UI ottimistica)
   const [segnalati, setSegnalati] = useState(new Set());
 
-  const segnala = async (collectionName, docId) => {
-    if (segnalati.has(docId)) return; // già segnalato
+  const toggleSegnalazione = async (collectionName, docId) => {
+    const giaSegnalato = segnalati.has(docId);
 
     // UI ottimistica immediata
-    setSegnalati(prev => new Set([...prev, docId]));
+    setSegnalati(prev => {
+      const n = new Set(prev);
+      giaSegnalato ? n.delete(docId) : n.add(docId);
+      return n;
+    });
 
     try {
-
       const ref = doc(db, collectionName, docId);
-      await updateDoc(ref, { segnalazioni: increment(1) });
 
-      // Nascondi automaticamente se raggiunge la soglia
-      const snap = await getDoc(ref);
-      if (snap.exists() && (snap.data().segnalazioni || 0) >= SOGLIA_SEGNALAZIONI) {
-        await updateDoc(ref, { nascosto: true });
+      if (giaSegnalato) {
+        // Rimozione: decrementa ma non andare sotto 0
+        const snap = await getDoc(ref);
+        const attuale = snap.data()?.segnalazioni || 0;
+        if (attuale > 0) {
+          await updateDoc(ref, { segnalazioni: increment(-1) });
+          // Se era nascosto per segnalazioni e ora scende sotto la soglia, riappare
+          if (attuale - 1 < SOGLIA_SEGNALAZIONI && snap.data()?.nascosto === true) {
+            await updateDoc(ref, { nascosto: false });
+          }
+        }
+      } else {
+        // Aggiunta: incrementa
+        await updateDoc(ref, { segnalazioni: increment(1) });
+        // Nascondi automaticamente se raggiunge la soglia
+        const snap = await getDoc(ref);
+        if (snap.exists() && (snap.data().segnalazioni || 0) >= SOGLIA_SEGNALAZIONI) {
+          await updateDoc(ref, { nascosto: true });
+        }
       }
     } catch (err) {
       console.error('Errore segnalazione:', err);
-      // Rollback ottimismo solo in caso di errore di rete
-      setSegnalati(prev => { const n = new Set(prev); n.delete(docId); return n; });
+      // Rollback ottimismo in caso di errore
+      setSegnalati(prev => {
+        const n = new Set(prev);
+        giaSegnalato ? n.add(docId) : n.delete(docId);
+        return n;
+      });
     }
   };
 
-  return { segnalati, segnala };
+  return { segnalati, segnala: toggleSegnalazione };
 };
 
-// Bottone bandierina riutilizzabile — riceve lo store come prop
+// Bottone bandierina riutilizzabile
 const BottoneSegnala = ({ docId, collectionName, segnalati, segnala, size = 12 }) => {
   const isSegnalato = segnalati.has(docId);
   return (
     <button
       onClick={(e) => { e.stopPropagation(); segnala(collectionName, docId); }}
       className="p-1 rounded-full transition-all active:scale-90 shrink-0"
-      title={isSegnalato ? 'Segnalazione inviata' : 'Segnala prezzo errato'}
+      title={isSegnalato ? 'Rimuovi segnalazione' : 'Segnala prezzo errato'}
       style={{ color: isSegnalato ? T.accent : T.border }}
     >
       <Flag size={size} strokeWidth={1.5}
@@ -408,6 +427,342 @@ const verificaExif = async (file) => {
     // Mai bloccare per errori di parsing EXIF
     return { ok: true, motivo: null, exif: null, exif_verificato: false };
   }
+};
+
+// ─── Modifica offerte — hook + componenti ────────────────────────────────────
+
+// Campi modificabili da un utente (Guru: diretti, altri: proposta)
+const CAMPI_EDITABILI = [
+  { key: 'nome',       label: 'Nome prodotto',  type: 'text' },
+  { key: 'marca',      label: 'Marca',          type: 'text' },
+  { key: 'grammatura', label: 'Grammatura',     type: 'text' },
+  { key: 'prezzo',     label: 'Prezzo (€)',     type: 'number' },
+  { key: 'categoria',  label: 'Categoria',      type: 'select' },
+];
+
+const CATEGORIE_MODIFICA = CATEGORIE.filter(c => c.id !== 'tutte');
+
+// Hook: gestisce lettura proposta e logica voto/approvazione
+const usePropostaOfferta = (offertaId) => {
+  const { utente, profilo } = useAuth();
+  const [proposta, setProposta] = useState(null);
+  const [loading, setLoading]   = useState(false);
+  const isGuru = (profilo?.punti || 0) >= 1000;
+
+  // Carica proposta esistente dal documento offerta
+  const caricaProposta = useCallback(async () => {
+    if (!offertaId) return;
+    setLoading(true);
+    try {
+      const snap = await getDoc(doc(db, 'offerte_attive', offertaId));
+      if (snap.exists()) setProposta(snap.data().proposta_modifica || null);
+    } catch {}
+    setLoading(false);
+  }, [offertaId]);
+
+  // Guru: modifica diretta sui campi dell'offerta
+  const modificaDiretta = async (campi) => {
+    if (!utente || !isGuru) return;
+    const ref = doc(db, 'offerte_attive', offertaId);
+    const aggiornamenti = { ...campi };
+    // Se cambia il prezzo ricalcola prezzo_kg se c'è grammatura
+    if (campi.prezzo && campi.grammatura) {
+      const grammi = parseFloat(campi.grammatura);
+      if (!isNaN(grammi) && grammi > 0) {
+        aggiornamenti.prezzo_kg = parseFloat((campi.prezzo / grammi * 1000).toFixed(2));
+      }
+    }
+    aggiornamenti.ultima_modifica_da = utente.uid;
+    aggiornamenti.ultima_modifica_il = serverTimestamp();
+    await updateDoc(ref, aggiornamenti);
+  };
+
+  // Utente base: invia proposta di modifica
+  const inviaProposta = async (campi) => {
+    if (!utente) return;
+    const ref = doc(db, 'offerte_attive', offertaId);
+    // Legge doc fresco per non sovrascrivere proposta esistente
+    const snap = await getDoc(ref);
+    if (snap.data()?.proposta_modifica?.stato === 'pending') {
+      throw new Error('proposta_esistente');
+    }
+    const nuovaProposta = {
+      campi,
+      uid_proponente: utente.uid,
+      data_proposta:  serverTimestamp(),
+      voti_guru:      [],
+      voti_utenti:    [],
+      stato:          'pending',
+    };
+    await updateDoc(ref, { proposta_modifica: nuovaProposta });
+    setProposta(nuovaProposta);
+  };
+
+  // Vota una proposta esistente (con runTransaction per atomicità)
+  const votaProposta = async () => {
+    if (!utente || !proposta) return;
+    const uid    = utente.uid;
+    const ref    = doc(db, 'offerte_attive', offertaId);
+    const SOGLIA = 3;
+
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ref);
+      const p    = snap.data()?.proposta_modifica;
+      if (!p || p.stato !== 'pending') throw new Error('nessuna proposta');
+
+      if (p.voti_guru?.includes(uid) || p.voti_utenti?.includes(uid)) {
+        throw new Error('già votato');
+      }
+
+      const nuoviGuru   = isGuru  ? [...(p.voti_guru   || []), uid] : (p.voti_guru   || []);
+      const nuoviUtenti = !isGuru ? [...(p.voti_utenti || []), uid] : (p.voti_utenti || []);
+      const approvata   = nuoviGuru.length >= 1 || nuoviUtenti.length >= SOGLIA;
+
+      if (approvata) {
+        // Promuovi i campi proposti direttamente sull'offerta
+        tx.update(ref, {
+          ...p.campi,
+          proposta_modifica:  null,
+          ultima_modifica_da: uid,
+          ultima_modifica_il: serverTimestamp(),
+        });
+        setProposta(null);
+      } else {
+        tx.update(ref, {
+          'proposta_modifica.voti_guru':   isGuru  ? arrayUnion(uid) : p.voti_guru   || [],
+          'proposta_modifica.voti_utenti': !isGuru ? arrayUnion(uid) : p.voti_utenti || [],
+        });
+        setProposta({ ...p, voti_guru: nuoviGuru, voti_utenti: nuoviUtenti });
+      }
+    });
+  };
+
+  return { proposta, loading, isGuru, caricaProposta, modificaDiretta, inviaProposta, votaProposta };
+};
+
+
+// Modal editing offerta — bottom sheet
+const ModalEditOfferta = ({ offerta, onChiudi }) => {
+  const { utente, profilo } = useAuth();
+  const isGuru = (profilo?.punti || 0) >= 1000;
+  const { proposta, loading, caricaProposta, modificaDiretta, inviaProposta, votaProposta } =
+    usePropostaOfferta(offerta?.id);
+
+  const [campi, setCampi] = useState({
+    nome:       offerta?.nome       || '',
+    marca:      offerta?.marca      || '',
+    grammatura: offerta?.grammatura || '',
+    prezzo:     offerta?.prezzo     || '',
+    categoria:  offerta?.categoria  || '',
+  });
+  const [stato, setStato]     = useState('idle'); // idle | salvando | ok | errore
+  const [errMsg, setErrMsg]   = useState('');
+  const [vistaVoto, setVistaVoto] = useState(false);
+
+  useEffect(() => { caricaProposta(); }, [caricaProposta]);
+
+  const aggiorna = (key, val) => setCampi(prev => ({ ...prev, [key]: val }));
+
+  const salva = async () => {
+    if (!utente) return;
+    setStato('salvando'); setErrMsg('');
+    try {
+      // Filtra solo i campi effettivamente modificati
+      const modificati = {};
+      CAMPI_EDITABILI.forEach(({ key }) => {
+        const valNuovo = key === 'prezzo' ? parseFloat(campi[key]) : campi[key];
+        const valOld   = offerta[key];
+        if (valNuovo !== valOld && campi[key] !== '') modificati[key] = valNuovo;
+      });
+      if (Object.keys(modificati).length === 0) { onChiudi(); return; }
+
+      if (isGuru) {
+        await modificaDiretta(modificati);
+        setStato('ok');
+        setTimeout(onChiudi, 1200);
+      } else {
+        await inviaProposta(modificati);
+        setStato('ok');
+        setTimeout(onChiudi, 1800);
+      }
+    } catch (err) {
+      if (err.message === 'proposta_esistente') {
+        setErrMsg('C\'è già una proposta in attesa. Puoi votarla per approvarla.');
+        setVistaVoto(true);
+      } else {
+        setErrMsg('Errore durante il salvataggio. Riprova.');
+      }
+      setStato('errore');
+    }
+  };
+
+  const haVotato = utente && proposta && (
+    proposta.voti_guru?.includes(utente.uid) ||
+    proposta.voti_utenti?.includes(utente.uid)
+  );
+
+  return (
+    // Backdrop
+    <div className="fixed inset-0 z-50 flex flex-col justify-end"
+      style={{ background: 'rgba(0,0,0,0.5)' }}
+      onClick={onChiudi}>
+
+      {/* Bottom sheet */}
+      <div className="rounded-t-[28px] flex flex-col max-h-[90vh]"
+        style={{ background: T.surface }}
+        onClick={e => e.stopPropagation()}>
+
+        {/* Handle */}
+        <div className="flex justify-center pt-3 pb-1">
+          <div className="w-10 h-1 rounded-full" style={{ background: T.border }} />
+        </div>
+
+        {/* Header */}
+        <div className="px-5 py-4 flex items-center gap-3"
+          style={{ borderBottom: `1px solid ${T.border}` }}>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs uppercase font-semibold tracking-wider mb-0.5"
+              style={{ color: T.textSec }}>
+              {isGuru ? '✏️ Modifica offerta' : '📋 Proponi correzione'}
+            </p>
+            <p className="text-sm font-medium truncate" style={{ color: T.textPrimary }}>
+              {offerta.nome} · {offerta.insegna}
+            </p>
+          </div>
+          <button onClick={onChiudi}
+            className="w-8 h-8 rounded-full flex items-center justify-center"
+            style={{ background: T.bg }}>
+            <X size={16} strokeWidth={2} style={{ color: T.textSec }} />
+          </button>
+        </div>
+
+        {/* Info ruolo */}
+        {!isGuru && (
+          <div className="mx-5 mt-4 px-4 py-3 rounded-[14px]"
+            style={{ background: '#EEF2E4' }}>
+            <p className="text-xs" style={{ color: T.primary }}>
+              💡 La tua correzione sarà visibile dopo l'approvazione di 1 Guru o 3 utenti della stessa città.
+            </p>
+          </div>
+        )}
+
+        {/* Proposta esistente — banner voto */}
+        {(proposta || vistaVoto) && proposta?.stato === 'pending' && (
+          <div className="mx-5 mt-4 rounded-[14px] p-4"
+            style={{ background: '#FEF3C7', border: '1px solid #FDE68A' }}>
+            <p className="text-xs font-semibold mb-1" style={{ color: '#92400E' }}>
+              📋 Proposta in attesa
+            </p>
+            <p className="text-[11px] mb-2" style={{ color: '#A16207' }}>
+              {proposta.voti_guru?.length || 0} Guru · {proposta.voti_utenti?.length || 0} utenti — serve 1 Guru o 3 utenti
+            </p>
+            {!haVotato ? (
+              <button onClick={async () => { try { await votaProposta(); } catch {} }}
+                className="w-full py-2 rounded-xl text-xs font-semibold"
+                style={{ background: '#92400E', color: '#fff' }}>
+                ✓ Confermo — la correzione è giusta
+              </button>
+            ) : (
+              <p className="text-xs text-center" style={{ color: '#92400E' }}>✓ Hai già votato</p>
+            )}
+          </div>
+        )}
+
+        {/* Form campi editabili */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {CAMPI_EDITABILI.map(({ key, label, type }) => (
+            <div key={key}>
+              <label className="block text-[10px] uppercase font-semibold mb-1.5"
+                style={{ color: T.primary }}>
+                {label}
+                {key === 'prezzo' && <span className="ml-1 font-normal normal-case" style={{ color: T.textSec }}>(originale: {offerta.prezzo?.toFixed(2)}€)</span>}
+              </label>
+
+              {type === 'select' ? (
+                <div className="flex flex-wrap gap-2">
+                  {CATEGORIE_MODIFICA.map(c => (
+                    <button key={c.id}
+                      onClick={() => aggiorna('categoria', c.id)}
+                      className="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+                      style={campi.categoria === c.id
+                        ? { background: T.primary, color: '#fff' }
+                        : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <input
+                  type={type}
+                  value={campi[key]}
+                  onChange={e => aggiorna(key, e.target.value)}
+                  step={type === 'number' ? '0.01' : undefined}
+                  min={type === 'number' ? '0' : undefined}
+                  className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
+                  style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }}
+                  placeholder={String(offerta[key] || '')}
+                />
+              )}
+            </div>
+          ))}
+
+          {/* Messaggio errore */}
+          {errMsg && (
+            <p className="text-xs px-3 py-2 rounded-xl"
+              style={{ background: '#FEE2E2', color: '#DC2626' }}>
+              {errMsg}
+            </p>
+          )}
+        </div>
+
+        {/* Footer bottone salva */}
+        <div className="px-5 py-4 shrink-0" style={{ borderTop: `1px solid ${T.border}` }}>
+          <button
+            onClick={salva}
+            disabled={stato === 'salvando'}
+            className="w-full py-3.5 rounded-[18px] text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+            style={{
+              background: stato === 'ok' ? '#16a34a' : T.primary,
+              color: '#fff',
+              boxShadow: '0 4px 16px rgba(100,113,68,0.3)',
+            }}>
+            {stato === 'salvando'
+              ? <><Loader size={16} strokeWidth={1.5} className="animate-spin" /> Salvo...</>
+              : stato === 'ok'
+                ? <><Check size={16} strokeWidth={2.5} /> {isGuru ? 'Salvato!' : 'Proposta inviata!'}</>
+                : isGuru
+                  ? <><Pencil size={16} strokeWidth={1.5} /> Salva modifica</>
+                  : <><Pencil size={16} strokeWidth={1.5} /> Invia correzione</>}
+          </button>
+          {!isGuru && stato !== 'ok' && (
+            <p className="text-center text-[10px] mt-2" style={{ color: T.textSec }}>
+              Richiede approvazione dalla community
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// Bottone matita — apre il modal edit sull'offerta
+const BotoneModifica = ({ offerta, size = 12 }) => {
+  const { utente } = useAuth();
+  const [aperto, setAperto] = useState(false);
+  if (!utente) return null; // solo utenti loggati
+  return (
+    <>
+      <button
+        onClick={(e) => { e.stopPropagation(); setAperto(true); }}
+        className="p-1 rounded-full transition-all active:scale-90 shrink-0"
+        title="Modifica / Correggi offerta"
+        style={{ color: T.border }}>
+        <Pencil size={size} strokeWidth={1.5} />
+      </button>
+      {aperto && <ModalEditOfferta offerta={offerta} onChiudi={() => setAperto(false)} />}
+    </>
+  );
 };
 
 const ProductCardBase = ({ offerta, storico = null, archivio = [], index = 0, segnalati, segnala }) => {
@@ -503,16 +858,19 @@ const ProductCardBase = ({ offerta, storico = null, archivio = [], index = 0, se
             <Clock size={12} strokeWidth={1.5} /> Scade domani
           </span>
         )}
-        {/* Segnalazione errore — allineata a destra */}
-        {segnalati && segnala && offerta.id && (
-          <div className="ml-auto">
-            <BottoneSegnala
-              docId={offerta.id}
-              collectionName="offerte_attive"
-              segnalati={segnalati}
-              segnala={segnala}
-              size={14}
-            />
+        {/* Segnalazione errore + modifica — allineati a destra */}
+        {offerta.id && (
+          <div className="ml-auto flex items-center gap-1">
+            {segnalati && segnala && (
+              <BottoneSegnala
+                docId={offerta.id}
+                collectionName="offerte_attive"
+                segnalati={segnalati}
+                segnala={segnala}
+                size={14}
+              />
+            )}
+            <BotoneModifica offerta={offerta} size={14} />
           </div>
         )}
       </div>
@@ -991,7 +1349,7 @@ const TabLoginRichiesto = ({ messaggio }) => {
         Continua con Google
       </button>
       <p className="text-center text-xs mt-4" style={{ color: T.textSec }}>
-        Le offerte e i negozi sono sempre visibili senza account
+        Le offerte sono sempre visibili senza account
       </p>
     </div>
   );
@@ -1041,14 +1399,6 @@ const TUTORIAL_STEPS = [
     posizione: 'bottom',
   },
   {
-    id:        'negozi',
-    tab:       'negozi',
-    target:    '[data-tutorial="tab-negozi"]',
-    titolo:    '🗺️ I negozi',
-    testo:     'Qui trovi le offerte per supermercato e le info su buoni pasto, metodi di pagamento e promozioni fisse.',
-    posizione: 'bottom',
-  },
-  {
     id:        'profilo',
     tab:       'profilo',
     target:    '[data-tutorial="tab-profilo"]',
@@ -1059,33 +1409,24 @@ const TUTORIAL_STEPS = [
 ];
 
 const Tutorial = ({ onCompleta, onSalta, setActiveTab }) => {
-  const [step, setStep]           = useState(0);
-  const [rect, setRect]           = useState(null);
-  const [pronto, setPronto]       = useState(false);
-  const stepCorrente              = TUTORIAL_STEPS[step];
+  const [step, setStep]     = useState(0);
+  const [rect, setRect]     = useState(null);
+  const [pronto, setPronto] = useState(false);
+  const stepCorrente        = TUTORIAL_STEPS[step];
 
-  // Quando cambia step: cambia tab se necessario, poi trova l'elemento target
   useEffect(() => {
     setPronto(false);
     setRect(null);
-
-    // Cambia tab se lo step lo richiede
     if (stepCorrente.tab) setActiveTab(stepCorrente.tab);
 
-    // Aspetta che il DOM si aggiorni dopo il cambio tab
     const timer = setTimeout(() => {
       const el = document.querySelector(stepCorrente.target);
       if (el) {
         const r = el.getBoundingClientRect();
-        setRect({
-          top:    r.top,
-          left:   r.left,
-          width:  r.width,
-          height: r.height,
-        });
+        setRect({ top: r.top, left: r.left, width: r.width, height: r.height });
       }
       setPronto(true);
-    }, 350); // attende l'animazione di cambio tab
+    }, 350);
 
     return () => clearTimeout(timer);
   }, [step, stepCorrente]);
@@ -1096,23 +1437,52 @@ const Tutorial = ({ onCompleta, onSalta, setActiveTab }) => {
   };
 
   const isUltimoStep = step === TUTORIAL_STEPS.length - 1;
-  const PADDING = 8; // px di padding intorno all'elemento evidenziato
+  const PADDING    = 8;
+  const TOOLTIP_GAP = 14;   // spazio tra elemento e tooltip
+  const NAV_H      = 96;    // altezza navbar in fondo (safe area inclusa)
+  const TOP_SAFE   = 52;    // altezza status bar / notch in alto
+  const MARGIN_H   = 16;    // margine orizzontale
 
-  // Calcola posizione tooltip: sopra o sotto l'elemento
-  const tooltipStyle = () => {
-    if (!rect) return { top: '50%', left: '1rem', right: '1rem', transform: 'translateY(-50%)' };
-    const pos = stepCorrente.posizione;
-    const base = { position: 'fixed', left: '1rem', right: '1rem', zIndex: 10001 };
-    if (pos === 'bottom') {
-      return { ...base, top: rect.top + rect.height + PADDING + 12 };
+  // Calcola posizione e dimensione massima del tooltip
+  const calcolaTooltip = () => {
+    const base = {
+      position: 'fixed',
+      left:     MARGIN_H,
+      right:    MARGIN_H,
+      zIndex:   10001,
+    };
+
+    if (!rect) {
+      // Nessun elemento trovato: centra verticalmente
+      const altezzaDisp = window.innerHeight - TOP_SAFE - NAV_H - 32;
+      return {
+        ...base,
+        top:       TOP_SAFE + 16,
+        maxHeight: altezzaDisp,
+        overflow:  'auto',
+      };
     }
-    return { ...base, bottom: window.innerHeight - rect.top + PADDING + 12 };
+
+    const spazioSotto = window.innerHeight - NAV_H - (rect.top + rect.height + PADDING);
+    const spazioSopra = rect.top - PADDING - TOP_SAFE;
+
+    if (spazioSotto >= spazioSopra) {
+      // Metti sotto — più spazio sotto
+      const topTooltip = rect.top + rect.height + PADDING + TOOLTIP_GAP;
+      const maxH       = window.innerHeight - NAV_H - topTooltip - 8;
+      return { ...base, top: topTooltip, maxHeight: Math.max(maxH, 140), overflow: 'auto' };
+    } else {
+      // Metti sopra — più spazio sopra
+      const bottomTooltip = window.innerHeight - rect.top + PADDING + TOOLTIP_GAP;
+      const maxH          = rect.top - PADDING - TOOLTIP_GAP - TOP_SAFE - 8;
+      return { ...base, bottom: bottomTooltip, maxHeight: Math.max(maxH, 140), overflow: 'auto' };
+    }
   };
 
   return (
     <div className="fixed inset-0 z-[9999]" style={{ pointerEvents: 'all' }}>
 
-      {/* Overlay scuro con "buco" spotlight — usa clip-path polygon */}
+      {/* Overlay scuro con buco spotlight */}
       {pronto && rect ? (
         <svg
           style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
@@ -1121,86 +1491,78 @@ const Tutorial = ({ onCompleta, onSalta, setActiveTab }) => {
             <mask id="spotlight-mask">
               <rect width="100%" height="100%" fill="white" />
               <rect
-                x={rect.left - PADDING}
-                y={rect.top - PADDING}
-                width={rect.width + PADDING * 2}
-                height={rect.height + PADDING * 2}
-                rx="12"
-                fill="black"
+                x={rect.left - PADDING} y={rect.top - PADDING}
+                width={rect.width + PADDING * 2} height={rect.height + PADDING * 2}
+                rx="12" fill="black"
               />
             </mask>
           </defs>
+          <rect width="100%" height="100%" fill="rgba(0,0,0,0.72)" mask="url(#spotlight-mask)" />
           <rect
-            width="100%" height="100%"
-            fill="rgba(0,0,0,0.72)"
-            mask="url(#spotlight-mask)"
-          />
-          {/* Bordo verde intorno all'elemento */}
-          <rect
-            x={rect.left - PADDING}
-            y={rect.top - PADDING}
-            width={rect.width + PADDING * 2}
-            height={rect.height + PADDING * 2}
-            rx="12"
-            fill="none"
-            stroke="#647144"
-            strokeWidth="2.5"
+            x={rect.left - PADDING} y={rect.top - PADDING}
+            width={rect.width + PADDING * 2} height={rect.height + PADDING * 2}
+            rx="12" fill="none" stroke="#647144" strokeWidth="2.5"
           />
         </svg>
       ) : (
-        // Overlay pieno mentre cerca l'elemento
         <div className="fixed inset-0" style={{ background: 'rgba(0,0,0,0.72)', pointerEvents: 'none' }} />
       )}
 
-      {/* Tooltip */}
+      {/* Tooltip — si posiziona dove c'è più spazio, mai fuori schermo */}
       <div
-        className="rounded-[20px] p-5 shadow-2xl"
+        className="rounded-[20px] shadow-2xl flex flex-col"
         style={{
-          ...tooltipStyle(),
+          ...calcolaTooltip(),
           background: '#fff',
           boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
         }}>
 
-        {/* Progress dots */}
-        <div className="flex justify-center gap-1.5 mb-4">
-          {TUTORIAL_STEPS.map((_, i) => (
-            <div key={i}
-              className="rounded-full transition-all duration-300"
-              style={{
-                width:  i === step ? 20 : 6,
-                height: 6,
-                background: i === step ? T.primary : '#D1D5DB',
-              }} />
-          ))}
+        {/* Contenuto scrollabile se necessario */}
+        <div className="p-5 flex-1 overflow-auto">
+          {/* Progress dots */}
+          <div className="flex justify-center gap-1.5 mb-4">
+            {TUTORIAL_STEPS.map((_, i) => (
+              <div key={i}
+                className="rounded-full transition-all duration-300"
+                style={{
+                  width:      i === step ? 20 : 6,
+                  height:     6,
+                  background: i === step ? T.primary : '#D1D5DB',
+                }} />
+            ))}
+          </div>
+
+          <h3 className="text-base font-semibold mb-2"
+            style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
+            {stepCorrente.titolo}
+          </h3>
+          <p className="text-sm leading-relaxed" style={{ color: T.textSec }}>
+            {stepCorrente.testo}
+          </p>
         </div>
 
-        <h3 className="text-base font-semibold mb-2"
-          style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
-          {stepCorrente.titolo}
-        </h3>
-        <p className="text-sm leading-relaxed mb-5" style={{ color: T.textSec }}>
-          {stepCorrente.testo}
-        </p>
-
-        <div className="flex items-center gap-3">
-          <button
-            onClick={onSalta}
-            className="text-xs px-3 py-2 rounded-xl"
-            style={{ color: T.textSec }}>
-            Salta
-          </button>
-          <button
-            onClick={avanti}
-            className="flex-1 py-3 rounded-[16px] text-sm font-semibold transition-all active:scale-[0.98] flex items-center justify-center gap-2"
-            style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
-            {isUltimoStep ? '🌿 Inizia a risparmiare!' : 'Avanti →'}
-          </button>
+        {/* Bottoni sempre visibili — sticky in fondo al tooltip */}
+        <div className="px-5 pb-5 pt-3 shrink-0"
+          style={{ borderTop: `1px solid ${T.border}` }}>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onSalta}
+              className="text-xs px-3 py-2.5 rounded-xl font-medium shrink-0"
+              style={{ color: T.textSec, background: T.bg }}>
+              Salta tutto
+            </button>
+            <button
+              onClick={avanti}
+              className="flex-1 py-3 rounded-[14px] text-sm font-semibold transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+              style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+              {isUltimoStep ? '🌿 Inizia a risparmiare!' : 'Avanti →'}
+            </button>
+          </div>
+          <p className="text-center text-[10px] mt-2.5" style={{ color: '#9CA3AF' }}>
+            {step + 1} di {TUTORIAL_STEPS.length}
+          </p>
         </div>
 
-        {/* Indicatore step */}
-        <p className="text-center text-[10px] mt-3" style={{ color: '#9CA3AF' }}>
-          {step + 1} di {TUTORIAL_STEPS.length}
-        </p>
       </div>
     </div>
   );
@@ -2299,7 +2661,7 @@ const TabScontrino = () => {
 
 // ─── ProductCard Compatta con Trust Signals (Task 2+8) ───────────────────────
 
-const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => {
+const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala, trend = null }) => {
   const giorni = calcGiorniRimanenti(offerta.valido_fino);
   const isScadenzaOggi = offerta.valido_fino === OGGI;
   const isScadenzaDomani = offerta.valido_fino === DOMANI;
@@ -2336,7 +2698,7 @@ const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => 
     >
       {/* Riga principale: prezzo + nome + scadenza */}
       <div className="flex items-center gap-3">
-        {/* Prezzo */}
+        {/* Prezzo + freccia trend */}
         <div className="shrink-0 text-right w-16">
           <div className="font-semibold leading-tight" style={{ fontFamily: "'Lora', serif", fontSize: '18px', color: T.textPrimary }}>
             {formattaPrezzo(offerta.prezzo)}
@@ -2344,6 +2706,24 @@ const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => 
           {offerta.prezzo_kg && (
             <div className="text-[10px] leading-tight mt-0.5" style={{ color: T.textSec }}>
               {formattaPrezzo(offerta.prezzo_kg)}/kg
+            </div>
+          )}
+          {/* Freccia andamento prezzo */}
+          {trend === 'giu' && (
+            <div className="flex items-center justify-end gap-0.5 mt-0.5">
+              <TrendingDown size={11} strokeWidth={2} style={{ color: '#16a34a' }} />
+              <span className="text-[9px] font-semibold" style={{ color: '#16a34a' }}>sceso</span>
+            </div>
+          )}
+          {trend === 'su' && (
+            <div className="flex items-center justify-end gap-0.5 mt-0.5">
+              <TrendingUp size={11} strokeWidth={2} style={{ color: '#dc2626' }} />
+              <span className="text-[9px] font-semibold" style={{ color: '#dc2626' }}>salito</span>
+            </div>
+          )}
+          {trend === 'stabile' && (
+            <div className="flex items-center justify-end mt-0.5">
+              <span className="text-[9px]" style={{ color: T.textSec }}>≈ stabile</span>
             </div>
           )}
         </div>
@@ -2381,6 +2761,7 @@ const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => 
             <BottoneSegnala docId={offerta.id} collectionName="offerte_attive"
               segnalati={segnalati} segnala={segnala} />
           )}
+          {offerta.id && <BotoneModifica offerta={offerta} />}
         </div>
       </div>
 
@@ -2441,7 +2822,8 @@ const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => 
 const ProductCardCompatta = React.memo(ProductCardCompattaBase, (prev, next) =>
   prev.offerta.id === next.offerta.id &&
   prev.offerta.prezzo === next.offerta.prezzo &&
-  prev.segnalati === next.segnalati
+  prev.segnalati === next.segnalati &&
+  prev.trend === next.trend
 );
 
 // ─── Tab Offerte ──────────────────────────────────────────────────────────────
@@ -2479,9 +2861,13 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
   const [categoriaAttiva, setCategoriaAttiva] = useState(null);
   const [ordinamento, setOrdinamento] = useState('prezzo_asc');
   const [showOrdinamento, setShowOrdinamento] = useState(false);
-  const [filtroInsegna, setFiltroInsegna] = useState(null); // filtro supermercato
+  const [filtroInsegna, setFiltroInsegna] = useState(null);
 
-  // ── Store segnalazioni — un'unica istanza per tutto il tab ───────────────
+  // ── Info pagamenti insegne (da info_insegne Firestore) ───────────────────
+  const [infoInsegne, setInfoInsegne] = useState({});  // { insegna: dati }
+  const [loadingInfo, setLoadingInfo] = useState(false);
+
+  // ── Store segnalazioni ────────────────────────────────────────────────────
   const { segnalati, segnala } = useSegnalazioniStore();
 
   // ── Deduplicazione + filtro nascosto ─────────────────────────────────────
@@ -2507,7 +2893,48 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
     filtroInsegna ? offerteDedup.filter(o => o.insegna === filtroInsegna) : offerteDedup,
     [offerteDedup, filtroInsegna]);
 
-  // ── HIGHLIGHTS: le migliori offerte curate ────────────────────────────────
+  // ── Fetch info pagamenti quando cambiano le insegne disponibili ──────────
+  useEffect(() => {
+    if (!insegneOfferte.length || !cittàAttiva) return;
+    let mounted = true;
+    setLoadingInfo(true);
+    Promise.all(
+      insegneOfferte.map(async ins => {
+        const id   = `${cittàAttiva}_${ins.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        const snap = await getDoc(doc(db, 'info_insegne', id));
+        return [ins, snap.exists() ? snap.data() : null];
+      })
+    ).then(entries => {
+      if (!mounted) return;
+      const mappa = {};
+      entries.forEach(([ins, dati]) => { if (dati?.dati) mappa[ins] = dati.dati; });
+      setInfoInsegne(mappa);
+    }).catch(() => {}).finally(() => { if (mounted) setLoadingInfo(false); });
+    return () => { mounted = false; };
+  }, [insegneOfferte.join(','), cittàAttiva]);
+
+  // ── Calcola trend prezzo per un'offerta usando l'archivio ─────────────────
+  // Ritorna: 'su' | 'giu' | 'stabile' | null (dati insufficienti)
+  const calcolaTrend = useCallback((offerta) => {
+    if (!archivio?.length) return null;
+    const storici = archivio
+      .filter(a =>
+        a.insegna === offerta.insegna &&
+        (a.nome?.toLowerCase() === offerta.nome?.toLowerCase() ||
+         a.nome_normalizzato?.toLowerCase() === offerta.nome?.toLowerCase()) &&
+        a.prezzo
+      )
+      .sort((a, b) => (a.valido_fino || '').localeCompare(b.valido_fino || ''))
+      .slice(-4); // ultime 4 settimane
+    if (!storici.length) return null;
+    const prezzoStoricoMedio = storici.reduce((s, a) => s + a.prezzo, 0) / storici.length;
+    const diff = offerta.prezzo - prezzoStoricoMedio;
+    const pct  = Math.abs(diff) / prezzoStoricoMedio;
+    if (pct < 0.03) return 'stabile'; // meno del 3% — stabile
+    return diff > 0 ? 'su' : 'giu';
+  }, [archivio]);
+
+  // ── HIGHLIGHTS ────────────────────────────────────────────────────────────
   const highlights = useMemo(() => {
     // Sezione 1: in scadenza oggi o domani (urgenza)
     const urgenti = offerteBase
@@ -2743,20 +3170,101 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
               </div>
             )}
 
-            {/* Top per categoria */}
-            <div>
-              <div className="flex items-center justify-between px-4 mb-3">
-                <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: T.textSec }}>
-                  ✦ Il più economico per categoria
-                </h2>
-              </div>
-              <div className="px-4 rounded-[20px] overflow-hidden mx-4"
-                style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
-                {highlights.topCategorie.map((o, i) => (
-                  <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
-                ))}
-              </div>
-            </div>
+            {/* Pagamenti & promozioni per insegna */}
+            {(() => {
+              const insegneConInfo = insegneOfferte.filter(ins => infoInsegne[ins]);
+              if (!insegneOfferte.length) return null;
+              return (
+                <div>
+                  <div className="flex items-center justify-between px-4 mb-3">
+                    <h2 className="text-xs font-semibold uppercase tracking-wider" style={{ color: T.textSec }}>
+                      💳 Pagamenti & promozioni
+                    </h2>
+                    {insegneConInfo.length === 0 && !loadingInfo && (
+                      <span className="text-[10px]" style={{ color: T.textSec }}>
+                        Nessuna info ancora
+                      </span>
+                    )}
+                  </div>
+
+                  {insegneConInfo.length > 0 ? (
+                    <div className="space-y-2 px-4">
+                      {insegneConInfo.map(ins => {
+                        const d = infoInsegne[ins];
+                        const accettaBuoni  = d.buoni_pasto?.accettati;
+                        const circuiti      = d.buoni_pasto?.circuiti || [];
+                        const promoFlat     = d.promozioni_flat || [];
+                        const pagamentiOk   = Object.entries(d.pagamenti || {})
+                          .filter(([k, v]) => v && k !== 'contanti')
+                          .map(([k]) => ({ bancomat: '💳', carta: '💳', contactless: '📱', satispay: '🟡' }[k] || ''))
+                          .filter(Boolean);
+
+                        return (
+                          <div key={ins}
+                            className="rounded-[16px] px-4 py-3"
+                            style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold mb-1.5" style={{ color: T.textPrimary }}>
+                                  {ins}
+                                </p>
+                                {/* Buoni pasto */}
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="text-[11px] px-2 py-0.5 rounded-full font-medium"
+                                    style={accettaBuoni
+                                      ? { background: '#EEF2E4', color: T.primary }
+                                      : { background: '#FEE2E2', color: '#DC2626' }}>
+                                    🎟️ {accettaBuoni ? 'Buoni sì' : 'Buoni no'}
+                                  </span>
+                                  {accettaBuoni && circuiti.slice(0, 2).map(c => (
+                                    <span key={c} className="text-[10px] px-1.5 py-0.5 rounded-full"
+                                      style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                                      {c}
+                                    </span>
+                                  ))}
+                                  {accettaBuoni && circuiti.length > 2 && (
+                                    <span className="text-[10px]" style={{ color: T.textSec }}>
+                                      +{circuiti.length - 2}
+                                    </span>
+                                  )}
+                                </div>
+                                {/* Promozioni flat */}
+                                {promoFlat.slice(0, 2).map((p, i) => (
+                                  <p key={i} className="text-[11px] mt-1" style={{ color: T.textSec }}>
+                                    📅 {p.regola}
+                                  </p>
+                                ))}
+                              </div>
+                              {/* Metodi pagamento */}
+                              {pagamentiOk.length > 0 && (
+                                <div className="flex gap-1 shrink-0">
+                                  {[...new Set(pagamentiOk)].map((emoji, i) => (
+                                    <span key={i} style={{ fontSize: '16px' }}>{emoji}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    /* Nessuna info — invito a contribuire */
+                    !loadingInfo && (
+                      <div className="mx-4 rounded-[16px] px-4 py-4 text-center"
+                        style={{ background: T.bg, border: `1px dashed ${T.border}` }}>
+                        <p className="text-sm mb-1" style={{ color: T.textSec }}>
+                          Nessuna info sui pagamenti ancora
+                        </p>
+                        <p className="text-xs" style={{ color: T.textSec }}>
+                          Apri la scheda di un supermercato nel tab Sfoglia per aggiungere info su buoni pasto e promozioni.
+                        </p>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Con tessera fedeltà */}
             {highlights.conTessera.length > 0 && (
@@ -2773,7 +3281,7 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
                 <div className="px-4 rounded-[20px] overflow-hidden mx-4"
                   style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 16px rgba(44,48,38,0.05)' }}>
                   {highlights.conTessera.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
                   ))}
                 </div>
               </div>
@@ -2827,7 +3335,7 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
                 <div className="rounded-[0px] overflow-hidden"
                   style={{ background: T.surface }}>
                   {offerteSfoglia.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
                   ))}
                 </div>
               </div>
@@ -2858,7 +3366,7 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
                 </p>
                 <div style={{ background: T.surface }}>
                   {offerteRicerca.map((o, i) => (
-                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />
+                    <ProductCardCompatta key={o.id || i} offerta={o} index={i} segnalati={segnalati} segnala={segnala} trend={calcolaTrend(o)} />
                   ))}
                 </div>
               </div>
@@ -4064,24 +4572,26 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
   const scontrini = (dataLoaded && scontriniReali.length > 0) ? scontriniReali : (isDemo ? MOCK_SCONTRINI : []);
 
   // Sprint 2: modal drill-down scontrino con editing prodotti
-  const [modalScontrino, setModalScontrino]         = useState(null);  // scontrino aperto
-  const [prodottiEdit, setProdottiEdit]             = useState([]);    // copia locale per editing
+  const [modalScontrino, setModalScontrino]         = useState(null);
+  const [prodottiEdit, setProdottiEdit]             = useState([]);
   const [salvataggioPending, setSalvataggioPending] = useState(false);
-  const [prodottoFocus, setProdottoFocus]           = useState(null);  // indice prodotto in edit
+  const [salvataggioOk, setSalvataggioOk]           = useState(false); // feedback successo
+  const [prodottoFocus, setProdottoFocus]           = useState(null);
 
   const apriModalScontrino = (s) => {
     if (isDemo) return;
-    // Clona i prodotti per editing locale — preserva nome_raw intatto
     const clone = (s.prodotti || []).map(p => ({ ...p }));
     setProdottiEdit(clone);
     setModalScontrino(s);
     setProdottoFocus(null);
+    setSalvataggioOk(false);
   };
 
   const chiudiModal = () => {
     setModalScontrino(null);
     setProdottiEdit([]);
     setProdottoFocus(null);
+    setSalvataggioOk(false);
   };
 
   const aggiornaNomeNorm = (idx, valore) => {
@@ -4090,16 +4600,27 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
     ));
   };
 
+  // Fix: aggiungiamo anche aggiornamento unità di misura
+  const aggiornaUnitaMisura = (idx, valore) => {
+    setProdottiEdit(prev => prev.map((p, i) =>
+      i === idx ? { ...p, unita_misura: valore } : p
+    ));
+  };
+
   const salvaModifiche = async () => {
     if (!utente || !modalScontrino || isDemo) return;
     setSalvataggioPending(true);
+    setSalvataggioOk(false);
     try {
-      // Salva su spese_personali/{uid}/scontrini/{id}
-      // Preserva nome_raw — sovrascrive solo nome_normalizzato
       const ref = doc(db, 'spese_personali', utente.uid, 'scontrini', modalScontrino.id);
       await updateDoc(ref, { prodotti: prodottiEdit });
-      // Aggiorna la copia locale nello scontrino aperto
-      setModalScontrino(prev => ({ ...prev, prodotti: prodottiEdit }));
+      // FIX BUG LOOP: non aggiornare modalScontrino con setModalScontrino
+      // (causava re-render → reset prodottoFocus → loop)
+      // Aggiorniamo solo il feedback visivo, i dati aggiornati
+      // sono già in prodottiEdit che è lo stato locale
+      setSalvataggioOk(true);
+      setProdottoFocus(null); // chiude il pannello editing dopo il salvataggio
+      setTimeout(() => setSalvataggioOk(false), 2500);
     } catch (err) {
       console.error('Errore salvataggio:', err);
     } finally {
@@ -4850,6 +5371,7 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
                   {/* Pannello editing — espanso al click */}
                   {inEdit && (
                     <div className="px-4 pb-4 space-y-3" style={{ borderTop: `1px solid ${T.border}` }}>
+                      {/* Nome normalizzato */}
                       <div className="pt-3">
                         <label className="block text-[10px] uppercase font-semibold mb-1.5" style={{ color: T.primary }}>
                           Nome corretto
@@ -4859,15 +5381,39 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
                           value={nomeNorm}
                           onChange={e => aggiornaNomeNorm(idx, e.target.value)}
                           placeholder={nomeRaw}
-                          autoFocus
                           className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
                           style={{ background: T.bg, border: `1px solid ${T.primary}`, color: T.textPrimary }}
                         />
                         <p className="text-[10px] mt-1.5" style={{ color: T.textSec }}>
-                          Nome originale: <span className="font-mono">{nomeRaw || '—'}</span>
+                          Originale: <span className="font-mono">{nomeRaw || '—'}</span>
                         </p>
                       </div>
-                      {/* Info extra in sola lettura */}
+
+                      {/* Unità di misura */}
+                      <div>
+                        <label className="block text-[10px] uppercase font-semibold mb-1.5" style={{ color: T.primary }}>
+                          Unità di misura
+                        </label>
+                        <div className="flex flex-wrap gap-2">
+                          {['al kg', 'al pezzo', 'per 100g', 'al litro', 'alla confezione'].map(um => (
+                            <button key={um}
+                              onClick={() => aggiornaUnitaMisura(idx, um === (p.unita_misura || '') ? '' : um)}
+                              className="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+                              style={(p.unita_misura || '') === um
+                                ? { background: T.primary, color: '#fff' }
+                                : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                              {um}
+                            </button>
+                          ))}
+                        </div>
+                        {p.unita_misura && (
+                          <p className="text-[10px] mt-1.5" style={{ color: T.textSec }}>
+                            Selezionata: <span className="font-medium" style={{ color: T.primary }}>{p.unita_misura}</span>
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Tag categoria e marca in sola lettura */}
                       {(p.categoria || p.marca) && (
                         <div className="flex gap-2 flex-wrap">
                           {p.categoria && (
@@ -4897,10 +5443,17 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
               onClick={salvaModifiche}
               disabled={salvataggioPending}
               className="w-full py-3.5 rounded-[18px] text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
-              style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+              style={{
+                background: salvataggioOk ? '#16a34a' : T.primary,
+                color: '#fff',
+                boxShadow: '0 4px 16px rgba(100,113,68,0.3)',
+              }}>
               {salvataggioPending
                 ? <><Loader size={16} strokeWidth={1.5} className="animate-spin" /> Salvo...</>
-                : <><Check size={16} strokeWidth={2} /> Salva correzioni</>}
+                : salvataggioOk
+                  ? <><Check size={16} strokeWidth={2.5} /> Salvato!</>
+                  : <><Check size={16} strokeWidth={2} /> Salva correzioni</>
+              }
             </button>
             <p className="text-[10px] text-center mt-2" style={{ color: T.textSec }}>
               Il nome originale dello scontrino non viene mai cancellato
@@ -5562,7 +6115,7 @@ function AppInterna() {
     try {
       const params = new URLSearchParams(window.location.search);
       const t = params.get('tab');
-      const validi = ['offerte', 'negozi', 'lista', 'scontrino', 'spese', 'profilo'];
+      const validi = ['offerte', 'lista', 'scontrino', 'spese', 'profilo'];
       if (t && validi.includes(t)) {
         // Rimuove il param senza reload
         const url = new URL(window.location.href);
@@ -5826,7 +6379,6 @@ function AppInterna() {
       )
     },
     { id: 'spese',      icon: <Wallet size={24} strokeWidth={1.5} />,   label: 'Spese' },
-    { id: 'negozi',     icon: <MapPin size={24} strokeWidth={1.5} />,   label: 'Negozi', dataTutorial: 'tab-negozi' },
     { id: 'profilo',    icon: utente?.photoURL
         ? <img src={utente.photoURL} alt="avatar" className="w-6 h-6 rounded-full" style={{ border: activeTab === 'profilo' ? `2px solid ${T.primary}` : '2px solid transparent' }} />
         : <User size={24} strokeWidth={1.5} />,
@@ -5862,7 +6414,6 @@ function AppInterna() {
 
       <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 6.5rem)' }}>
         {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
-        {activeTab === 'negozi'     && <TabSupermercati offerte={offerte} statoVolantini={statoVolantini} />}
         {activeTab === 'lista'      && (utente
           ? <TabListaSpesa offerte={offerte} archivio={archivio} />
           : <TabLoginRichiesto messaggio="Accedi per gestire la tua lista della spesa e usare il Verdetto Spesa." />
