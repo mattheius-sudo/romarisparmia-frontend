@@ -3395,6 +3395,10 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
 };
 
 
+// Normalizza una stringa di lista per confronto/deduplicazione
+const normalizzaLista = (items) =>
+  [...items].map(i => i.toLowerCase().trim()).sort().join('|');
+
 const LISTA_INIT = {
   budgetInput:     '',
   budgetEditing:   false,
