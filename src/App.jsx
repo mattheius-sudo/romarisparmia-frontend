@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { collection, getDocs, query, where, orderBy, limit, addDoc, updateDoc, deleteDoc, doc, serverTimestamp, increment, getDoc } from 'firebase/firestore';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { collection, getDocs, query, where, orderBy, limit, addDoc, updateDoc, deleteDoc, doc, setDoc, serverTimestamp, increment, getDoc, arrayUnion, runTransaction } from 'firebase/firestore';
 import { db } from './firebase';
-import { AuthProvider, useAuth, INSEGNE_DISPONIBILI } from './AuthContext';
+import { AuthProvider, useAuth, INSEGNE_DISPONIBILI, CITTA_DISPONIBILI } from './AuthContext';
 // statoVolantini viene ora passato come prop anche alla selezione supermercati
 import {
   Search,
+  Share2,
   ListTodo,
   Info,
   Tag,
@@ -408,7 +409,7 @@ const verificaExif = async (file) => {
   }
 };
 
-const ProductCard = ({ offerta, storico = null, archivio = [], index = 0, segnalati, segnala }) => {
+const ProductCardBase = ({ offerta, storico = null, archivio = [], index = 0, segnalati, segnala }) => {
   const isScadenzaOggi = offerta.valido_fino === OGGI;
   const isScadenzaDomani = offerta.valido_fino === DOMANI;
 
@@ -517,6 +518,14 @@ const ProductCard = ({ offerta, storico = null, archivio = [], index = 0, segnal
     </div>
   );
 };
+// React.memo: evita re-render quando offerta e segnalazioni non cambiano
+// Fondamentale nelle liste lunghe dove il parent aggiorna stato (filtri, ordinamento)
+const ProductCard = React.memo(ProductCardBase, (prev, next) =>
+  prev.offerta.id === next.offerta.id &&
+  prev.offerta.prezzo === next.offerta.prezzo &&
+  prev.offerta.nascosto === next.offerta.nascosto &&
+  prev.segnalati === next.segnalati
+);
 
 // ─── Schermata Selezione Supermercati (onboarding step 2) ────────────────────
 // Mostrata dopo il login se onboarding_supermercati === false.
@@ -777,7 +786,7 @@ const SezioneSupermercati = () => {
                       value={numeroInput}
                       onChange={e => setNumeroInput(e.target.value)}
                       placeholder="Es. 1234567890"
-                      className="flex-1 px-3 py-2 rounded-xl text-sm outline-none"
+                      className="flex-1 px-3 py-2 rounded-xl text-base outline-none"
                       style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
                     />
                     <button
@@ -864,7 +873,7 @@ const SezioneProdottiPreferiti = () => {
               value={form.label}
               onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
               placeholder="Es. Latte Arborea"
-              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+              className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
               style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
             />
           </div>
@@ -876,7 +885,7 @@ const SezioneProdottiPreferiti = () => {
               value={form.nome_ricerca}
               onChange={e => setForm(f => ({ ...f, nome_ricerca: e.target.value }))}
               placeholder="Es. latte parzialmente scremato arborea"
-              className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+              className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
               style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
             />
             <p className="text-xs mt-1" style={{ color: T.textSec }}>Se vuoto, usa il nome breve</p>
@@ -886,14 +895,14 @@ const SezioneProdottiPreferiti = () => {
               value={form.marca}
               onChange={e => setForm(f => ({ ...f, marca: e.target.value }))}
               placeholder="Marca"
-              className="flex-1 px-3 py-2.5 rounded-xl text-sm outline-none"
+              className="flex-1 px-3 py-2.5 rounded-xl text-base outline-none"
               style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
             />
             <input
               value={form.grammatura}
               onChange={e => setForm(f => ({ ...f, grammatura: e.target.value }))}
               placeholder="Formato"
-              className="w-24 px-3 py-2.5 rounded-xl text-sm outline-none"
+              className="w-24 px-3 py-2.5 rounded-xl text-base outline-none"
               style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary }}
             />
           </div>
@@ -951,8 +960,253 @@ const SezioneProdottiPreferiti = () => {
 
 // ─── Tab Profilo ──────────────────────────────────────────────────────────────
 
+// ─── TabLoginRichiesto — schermata inline per tab protetti ───────────────────
+const TabLoginRichiesto = ({ messaggio }) => {
+  const { login } = useAuth();
+  return (
+    <div className="flex flex-col h-full items-center justify-center px-8 pb-24"
+      style={{ background: T.bg }}>
+      <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-6"
+        style={{ background: '#EEF2E4' }}>
+        <IconaLenticchia size={40} style={{ color: T.primary }} />
+      </div>
+      <h2 className="text-center mb-3"
+        style={{ fontFamily: "'Lora', serif", fontSize: '22px', fontWeight: 500, color: T.textPrimary }}>
+        Accedi a Lenticchia
+      </h2>
+      <p className="text-center text-sm leading-relaxed mb-8" style={{ color: T.textSec }}>
+        {messaggio}
+      </p>
+      <button
+        onClick={login}
+        className="w-full flex items-center justify-center gap-3 py-3.5 rounded-[18px] font-semibold text-sm transition-all active:scale-[0.98]"
+        style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 20px rgba(100,113,68,0.3)' }}>
+        <svg width="18" height="18" viewBox="0 0 18 18">
+          <path d="M16.51 8H8.98v3h4.3c-.18 1-.74 1.48-1.6 2.04v2.01h2.6a7.8 7.8 0 0 0 2.38-5.88c0-.57-.05-.66-.15-1.18z" fill="#fff" opacity=".9"/>
+          <path d="M8.98 17c2.16 0 3.97-.72 5.3-1.94l-2.6-2.01c-.72.48-1.63.76-2.7.76-2.08 0-3.84-1.4-4.47-3.29H1.83v2.07A8 8 0 0 0 8.98 17z" fill="#fff" opacity=".9"/>
+          <path d="M4.51 10.52A4.8 4.8 0 0 1 4.26 9c0-.52.09-1.03.25-1.52V5.41H1.83A8 8 0 0 0 .98 9c0 1.29.31 2.51.85 3.59l2.68-2.07z" fill="#fff" opacity=".7"/>
+          <path d="M8.98 4.18c1.17 0 2.23.4 3.06 1.2l2.3-2.3A8 8 0 0 0 8.98 1a8 8 0 0 0-7.15 4.41l2.68 2.1c.63-1.89 2.39-3.33 4.47-3.33z" fill="#fff" opacity=".7"/>
+        </svg>
+        Continua con Google
+      </button>
+      <p className="text-center text-xs mt-4" style={{ color: T.textSec }}>
+        Le offerte e i negozi sono sempre visibili senza account
+      </p>
+    </div>
+  );
+};
+
+// ─── Tutorial in-app — spotlight a step ──────────────────────────────────────
+
+const TUTORIAL_STEPS = [
+  {
+    id:        'offerte',
+    tab:       'offerte',
+    target:    '[data-tutorial="offerte-header"]',
+    titolo:    '🛒 Le offerte della settimana',
+    testo:     'Ogni settimana raccogliamo le migliori offerte dai supermercati della tua città. I prezzi cambiano ogni giovedì.',
+    posizione: 'bottom',
+  },
+  {
+    id:        'filtro-insegna',
+    tab:       'offerte',
+    target:    '[data-tutorial="filtro-insegna"]',
+    titolo:    '🏪 Filtra per supermercato',
+    testo:     'Tocca un chip per vedere solo le offerte di quel supermercato. "Tutti" le mostra insieme.',
+    posizione: 'bottom',
+  },
+  {
+    id:        'lista',
+    tab:       'lista',
+    target:    '[data-tutorial="lista-textarea"]',
+    titolo:    '📝 La tua lista della spesa',
+    testo:     'Scrivi qui cosa devi comprare — un prodotto per riga. Puoi condividerla con chi fa la spesa con te.',
+    posizione: 'bottom',
+  },
+  {
+    id:        'verdetto',
+    tab:       'lista',
+    target:    '[data-tutorial="bottone-analizza"]',
+    titolo:    '🏆 Il Verdetto Spesa',
+    testo:     'Tocca "Cerca offerte" e Lenticchia trova dove conviene comprare tutto quello che hai in lista, questa settimana.',
+    posizione: 'top',
+  },
+  {
+    id:        'scontrino',
+    tab:       'scontrino',
+    target:    '[data-tutorial="tab-scontrino"]',
+    titolo:    '📸 Fotografa lo scontrino',
+    testo:     'Dopo la spesa carica lo scontrino. Lenticchia estrae i prezzi automaticamente e costruisce il tuo storico personale.',
+    posizione: 'bottom',
+  },
+  {
+    id:        'negozi',
+    tab:       'negozi',
+    target:    '[data-tutorial="tab-negozi"]',
+    titolo:    '🗺️ I negozi',
+    testo:     'Qui trovi le offerte per supermercato e le info su buoni pasto, metodi di pagamento e promozioni fisse.',
+    posizione: 'bottom',
+  },
+  {
+    id:        'profilo',
+    tab:       'profilo',
+    target:    '[data-tutorial="tab-profilo"]',
+    titolo:    '🌟 Punti e livelli',
+    testo:     'Guadagni punti caricando scontrini e volantini. I Guru sbloccano funzioni esclusive come il caricamento volantini.',
+    posizione: 'top',
+  },
+];
+
+const Tutorial = ({ onCompleta, onSalta, setActiveTab }) => {
+  const [step, setStep]           = useState(0);
+  const [rect, setRect]           = useState(null);
+  const [pronto, setPronto]       = useState(false);
+  const stepCorrente              = TUTORIAL_STEPS[step];
+
+  // Quando cambia step: cambia tab se necessario, poi trova l'elemento target
+  useEffect(() => {
+    setPronto(false);
+    setRect(null);
+
+    // Cambia tab se lo step lo richiede
+    if (stepCorrente.tab) setActiveTab(stepCorrente.tab);
+
+    // Aspetta che il DOM si aggiorni dopo il cambio tab
+    const timer = setTimeout(() => {
+      const el = document.querySelector(stepCorrente.target);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        setRect({
+          top:    r.top,
+          left:   r.left,
+          width:  r.width,
+          height: r.height,
+        });
+      }
+      setPronto(true);
+    }, 350); // attende l'animazione di cambio tab
+
+    return () => clearTimeout(timer);
+  }, [step, stepCorrente]);
+
+  const avanti = () => {
+    if (step < TUTORIAL_STEPS.length - 1) setStep(s => s + 1);
+    else onCompleta();
+  };
+
+  const isUltimoStep = step === TUTORIAL_STEPS.length - 1;
+  const PADDING = 8; // px di padding intorno all'elemento evidenziato
+
+  // Calcola posizione tooltip: sopra o sotto l'elemento
+  const tooltipStyle = () => {
+    if (!rect) return { top: '50%', left: '1rem', right: '1rem', transform: 'translateY(-50%)' };
+    const pos = stepCorrente.posizione;
+    const base = { position: 'fixed', left: '1rem', right: '1rem', zIndex: 10001 };
+    if (pos === 'bottom') {
+      return { ...base, top: rect.top + rect.height + PADDING + 12 };
+    }
+    return { ...base, bottom: window.innerHeight - rect.top + PADDING + 12 };
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9999]" style={{ pointerEvents: 'all' }}>
+
+      {/* Overlay scuro con "buco" spotlight — usa clip-path polygon */}
+      {pronto && rect ? (
+        <svg
+          style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+          xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <mask id="spotlight-mask">
+              <rect width="100%" height="100%" fill="white" />
+              <rect
+                x={rect.left - PADDING}
+                y={rect.top - PADDING}
+                width={rect.width + PADDING * 2}
+                height={rect.height + PADDING * 2}
+                rx="12"
+                fill="black"
+              />
+            </mask>
+          </defs>
+          <rect
+            width="100%" height="100%"
+            fill="rgba(0,0,0,0.72)"
+            mask="url(#spotlight-mask)"
+          />
+          {/* Bordo verde intorno all'elemento */}
+          <rect
+            x={rect.left - PADDING}
+            y={rect.top - PADDING}
+            width={rect.width + PADDING * 2}
+            height={rect.height + PADDING * 2}
+            rx="12"
+            fill="none"
+            stroke="#647144"
+            strokeWidth="2.5"
+          />
+        </svg>
+      ) : (
+        // Overlay pieno mentre cerca l'elemento
+        <div className="fixed inset-0" style={{ background: 'rgba(0,0,0,0.72)', pointerEvents: 'none' }} />
+      )}
+
+      {/* Tooltip */}
+      <div
+        className="rounded-[20px] p-5 shadow-2xl"
+        style={{
+          ...tooltipStyle(),
+          background: '#fff',
+          boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
+        }}>
+
+        {/* Progress dots */}
+        <div className="flex justify-center gap-1.5 mb-4">
+          {TUTORIAL_STEPS.map((_, i) => (
+            <div key={i}
+              className="rounded-full transition-all duration-300"
+              style={{
+                width:  i === step ? 20 : 6,
+                height: 6,
+                background: i === step ? T.primary : '#D1D5DB',
+              }} />
+          ))}
+        </div>
+
+        <h3 className="text-base font-semibold mb-2"
+          style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
+          {stepCorrente.titolo}
+        </h3>
+        <p className="text-sm leading-relaxed mb-5" style={{ color: T.textSec }}>
+          {stepCorrente.testo}
+        </p>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onSalta}
+            className="text-xs px-3 py-2 rounded-xl"
+            style={{ color: T.textSec }}>
+            Salta
+          </button>
+          <button
+            onClick={avanti}
+            className="flex-1 py-3 rounded-[16px] text-sm font-semibold transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+            style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+            {isUltimoStep ? '🌿 Inizia a risparmiare!' : 'Avanti →'}
+          </button>
+        </div>
+
+        {/* Indicatore step */}
+        <p className="text-center text-[10px] mt-3" style={{ color: '#9CA3AF' }}>
+          {step + 1} di {TUTORIAL_STEPS.length}
+        </p>
+      </div>
+    </div>
+  );
+};
+
 const TabProfilo = () => {
-  const { utente, profilo, logout, isLoggedIn } = useAuth();
+  const { utente, profilo, logout, isLoggedIn, cambiaCittà, cittàAttiva, riavviaTutorial } = useAuth();
   const [sezione, setSezione] = useState('account'); // 'account' | 'attivita' | 'supermercati' | 'prodotti'
   // G1: log attività punti
   const [logAttivita, setLogAttivita] = useState([]);
@@ -1074,6 +1328,47 @@ const TabProfilo = () => {
                     {puntiProssimo - puntiAttuali} punti al prossimo livello
                   </p>
                 </>
+              )}
+            </div>
+
+            {/* Tutorial */}
+            <div className="rounded-[20px] p-5"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <h3 className="text-xs font-medium uppercase tracking-wider mb-3" style={{ color: T.textSec }}>Guida all'app</h3>
+              <p className="text-xs mb-3" style={{ color: T.textSec }}>
+                Rivedi il tour guidato che mostra tutte le funzioni principali di Lenticchia.
+              </p>
+              <button
+                onClick={riavviaTutorial}
+                className="w-full py-3 rounded-[16px] text-sm font-medium transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+                style={{ background: '#EEF2E4', color: T.primary }}>
+                🌿 Riavvia il tutorial
+              </button>
+            </div>
+
+            {/* Città attiva — selettore */}
+            <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 24px rgba(44,48,38,0.05)' }}>
+              <h3 className="text-xs font-medium uppercase tracking-wider mb-3" style={{ color: T.textSec }}>La tua città</h3>
+              <p className="text-xs mb-3" style={{ color: T.textSec }}>
+                Vedi le offerte della città selezionata. Puoi cambiarla in qualsiasi momento.
+              </p>
+              <div className="flex gap-2">
+                {CITTA_DISPONIBILI.map(c => (
+                  <button key={c.id}
+                    onClick={() => cambiaCittà(c.id)}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-[14px] text-sm font-medium transition-all active:scale-[0.97]"
+                    style={cittàAttiva === c.id
+                      ? { background: T.primary, color: '#fff', boxShadow: '0 4px 12px rgba(100,113,68,0.25)' }
+                      : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                    <span>{c.emoji}</span>
+                    <span>{c.label}</span>
+                  </button>
+                ))}
+              </div>
+              {profilo?.città_registrazione && profilo.città_registrazione !== cittàAttiva && (
+                <p className="text-[10px] mt-2 text-center" style={{ color: T.textSec }}>
+                  Registrato a {profilo.città_registrazione} · stai vedendo {cittàAttiva}
+                </p>
               )}
             </div>
 
@@ -1288,22 +1583,69 @@ const TabProfilo = () => {
 
 // ─── Tab Invia Scontrino ─────────────────────────────────────────────────────
 
+const SCONTRINO_INIT = {
+  modalita:         'scontrino',  // 'scontrino' | 'volantino'
+  stato:            'idle',       // 'idle' | 'caricando' | 'successo' | 'errore'
+  messaggio:        '',
+  puntiAnimati:     false,
+  foto:             [],
+  insegnaVolantino: '',
+  validoFino:       '',
+  posizioneRilevata: null,
+  scontriniInAttesa: [],
+  loadingInAttesa:  false,
+  annullando:       null,
+};
+
+function scontrinoReducer(state, action) {
+  switch (action.type) {
+    case 'SET_MODALITA':    return { ...state, modalita: action.payload, stato: 'idle', messaggio: '', foto: [] };
+    case 'SET_STATO':       return { ...state, stato: action.payload };
+    case 'SET_MESSAGGIO':   return { ...state, messaggio: action.payload };
+    case 'SET_PUNTI':       return { ...state, puntiAnimati: action.payload };
+    case 'SET_FOTO':        return { ...state, foto: action.payload };
+    case 'SET_INSEGNA':     return { ...state, insegnaVolantino: action.payload };
+    case 'SET_VALIDO_FINO': return { ...state, validoFino: action.payload };
+    case 'SET_POSIZIONE':   return { ...state, posizioneRilevata: action.payload };
+    case 'SET_IN_ATTESA':   return { ...state, scontriniInAttesa: action.payload };
+    case 'SET_LOADING':     return { ...state, loadingInAttesa: action.payload };
+    case 'SET_ANNULLANDO':  return { ...state, annullando: action.payload };
+    case 'ANNULLA_OK':      return { ...state, scontriniInAttesa: state.scontriniInAttesa.filter(s => s.id !== action.payload), annullando: null };
+    case 'RESET_FORM':      return { ...state, stato: 'idle', messaggio: '', foto: [], puntiAnimati: false };
+    default:                return state;
+  }
+}
+
 const TabScontrino = () => {
   const { utente, profilo } = useAuth();
   const isGuru = (profilo?.punti || 0) >= 1000;
-  const [modalita, setModalita] = useState('scontrino');
-  const [stato, setStato] = useState('idle');
-  const [messaggio, setMessaggio] = useState('');
-  const [puntiAnimati, setPuntiAnimati] = useState(false);
-  const [foto, setFoto] = useState([]);
-  const [insegnaVolantino, setInsegnaVolantino] = useState('');
-  const [validoFino, setValidoFino] = useState('');
-  // Posizione GPS rilevata durante l'upload (metadato opzionale)
-  const [posizioneRilevata, setPosizioneRilevata] = useState(null);
-  // A1: scontrini in_attesa annullabili
-  const [scontriniInAttesa, setScontriniInAttesa] = useState([]);
-  const [loadingInAttesa, setLoadingInAttesa] = useState(false);
-  const [annullando, setAnnullando] = useState(null); // id doc in annullamento
+  const [s, dispatch] = React.useReducer(scontrinoReducer, SCONTRINO_INIT);
+
+  // Alias leggibili per il JSX — evita di riscrivere tutto il componente
+  const modalita          = s.modalita;
+  const stato             = s.stato;
+  const messaggio         = s.messaggio;
+  const puntiAnimati      = s.puntiAnimati;
+  const foto              = s.foto;
+  const insegnaVolantino  = s.insegnaVolantino;
+  const validoFino        = s.validoFino;
+  const posizioneRilevata = s.posizioneRilevata;
+  const scontriniInAttesa = s.scontriniInAttesa;
+  const loadingInAttesa   = s.loadingInAttesa;
+  const annullando        = s.annullando;
+
+  // Setter compatibili con il vecchio codice — wrappano il dispatch
+  const setModalita          = (v) => dispatch({ type: 'SET_MODALITA', payload: v });
+  const setStato             = (v) => dispatch({ type: 'SET_STATO', payload: v });
+  const setMessaggio         = (v) => dispatch({ type: 'SET_MESSAGGIO', payload: v });
+  const setPuntiAnimati      = (v) => dispatch({ type: 'SET_PUNTI', payload: v });
+  const setFoto              = (v) => dispatch({ type: 'SET_FOTO', payload: typeof v === 'function' ? v(foto) : v });
+  const setInsegnaVolantino  = (v) => dispatch({ type: 'SET_INSEGNA', payload: v });
+  const setValidoFino        = (v) => dispatch({ type: 'SET_VALIDO_FINO', payload: v });
+  const setPosizioneRilevata = (v) => dispatch({ type: 'SET_POSIZIONE', payload: v });
+  const setScontriniInAttesa = (v) => dispatch({ type: 'SET_IN_ATTESA', payload: typeof v === 'function' ? v(scontriniInAttesa) : v });
+  const setLoadingInAttesa   = (v) => dispatch({ type: 'SET_LOADING', payload: v });
+  const setAnnullando        = (v) => dispatch({ type: 'SET_ANNULLANDO', payload: v });
   const inputRef = React.useRef(null);
   const inputVolRef = React.useRef(null);
   const MAX_FOTO = 4;
@@ -1312,6 +1654,7 @@ const TabScontrino = () => {
   // A1: carica scontrini in attesa all'apertura del tab
   useEffect(() => {
     if (!utente) return;
+    let mounted = true;
     const carica = async () => {
       setLoadingInAttesa(true);
       try {
@@ -1323,11 +1666,12 @@ const TabScontrino = () => {
           limit(10)
         );
         const snap = await getDocs(q);
-        setScontriniInAttesa(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-      } catch { setScontriniInAttesa([]); }
-      finally { setLoadingInAttesa(false); }
+        if (mounted) setScontriniInAttesa(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch { if (mounted) setScontriniInAttesa([]); }
+      finally { if (mounted) setLoadingInAttesa(false); }
     };
     carica();
+    return () => { mounted = false; };
   }, [utente]);
 
   // A1: annulla un singolo scontrino in_attesa
@@ -1335,7 +1679,7 @@ const TabScontrino = () => {
     setAnnullando(docId);
     try {
       await deleteDoc(doc(db, 'coda_scontrini', docId));
-      setScontriniInAttesa(prev => prev.filter(s => s.id !== docId));
+      dispatch({ type: 'ANNULLA_OK', payload: docId });
     } catch (err) {
       console.error('Errore annullamento:', err);
     } finally { setAnnullando(null); }
@@ -1463,6 +1807,7 @@ const TabScontrino = () => {
         immagini_b64:     foto.map(f => f.base64),
         n_foto:           foto.length,
         stato:            'in_attesa',
+        città:            profilo?.città_attiva || null,
         data_caricamento: serverTimestamp(),
       });
 
@@ -1508,6 +1853,7 @@ const TabScontrino = () => {
         insegna:          insegnaVolantino.trim(),
         valido_fino:      validoFino || null,
         stato:            'in_attesa',
+        città:            profilo?.città_attiva || null,
         data_caricamento: serverTimestamp(),
         posizione_upload: posizioneRilevata
           ? { lat: posizioneRilevata.lat, lng: posizioneRilevata.lng }
@@ -1729,7 +2075,7 @@ const TabScontrino = () => {
                     value={insegnaVolantino}
                     onChange={e => setInsegnaVolantino(e.target.value)}
                     placeholder="Es. Conad, Carrefour, Iper..."
-                    className="w-full px-4 py-3 rounded-2xl text-sm outline-none"
+                    className="w-full px-4 py-3 rounded-2xl text-base outline-none"
                     style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
                   />
                 </div>
@@ -1741,7 +2087,7 @@ const TabScontrino = () => {
                     type="date"
                     value={validoFino}
                     onChange={e => setValidoFino(e.target.value)}
-                    className="w-full px-4 py-3 rounded-2xl text-sm outline-none"
+                    className="w-full px-4 py-3 rounded-2xl text-base outline-none"
                     style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
                   />
                 </div>
@@ -1798,7 +2144,7 @@ const TabScontrino = () => {
                       value={insegnaVolantino}
                       onChange={e => setInsegnaVolantino(e.target.value)}
                       placeholder="Es. Conad, Carrefour..."
-                      className="w-full px-4 py-2.5 rounded-xl text-sm outline-none"
+                      className="w-full px-4 py-2.5 rounded-xl text-base outline-none"
                       style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }}
                     />
                   </div>
@@ -1810,7 +2156,7 @@ const TabScontrino = () => {
                       type="date"
                       value={validoFino}
                       onChange={e => setValidoFino(e.target.value)}
-                      className="w-full px-4 py-2.5 rounded-xl text-sm outline-none"
+                      className="w-full px-4 py-2.5 rounded-xl text-base outline-none"
                       style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }}
                     />
                   </div>
@@ -1952,7 +2298,7 @@ const TabScontrino = () => {
 
 // ─── ProductCard Compatta con Trust Signals (Task 2+8) ───────────────────────
 
-const ProductCardCompatta = ({ offerta, index = 0, segnalati, segnala }) => {
+const ProductCardCompattaBase = ({ offerta, index = 0, segnalati, segnala }) => {
   const giorni = calcGiorniRimanenti(offerta.valido_fino);
   const isScadenzaOggi = offerta.valido_fino === OGGI;
   const isScadenzaDomani = offerta.valido_fino === DOMANI;
@@ -2089,6 +2435,13 @@ const ProductCardCompatta = ({ offerta, index = 0, segnalati, segnala }) => {
     </div>
   );
 };
+// React.memo: nella lista highlights (8+ card) evita re-render inutili
+// quando cambia solo il filtro insegna o l'ordinamento del tab genitore
+const ProductCardCompatta = React.memo(ProductCardCompattaBase, (prev, next) =>
+  prev.offerta.id === next.offerta.id &&
+  prev.offerta.prezzo === next.offerta.prezzo &&
+  prev.segnalati === next.segnalati
+);
 
 // ─── Tab Offerte ──────────────────────────────────────────────────────────────
 
@@ -2119,7 +2472,7 @@ const CATEGORIE_EMOJI = {
   altro:          '📦',
 };
 
-const TabOfferte = ({ offerte, archivio = [] }) => {
+const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
   const [vista, setVista] = useState('highlights');
   const [searchQuery, setSearchQuery] = useState('');
   const [categoriaAttiva, setCategoriaAttiva] = useState(null);
@@ -2135,11 +2488,13 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
     const seen = new Map();
     offerte.forEach(o => {
       if (o.nascosto) return;
+      // Filtra per città se l'utente ne ha una impostata
+      if (cittàAttiva && o.città && o.città !== cittàAttiva) return;
       const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
       if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
     });
     return [...seen.values()].filter(o => !o.valido_fino || o.valido_fino >= OGGI);
-  }, [offerte]);
+  }, [offerte, cittàAttiva]);
 
   // ── Insegne disponibili per il chip-filter ────────────────────────────────
   const insegneOfferte = useMemo(() =>
@@ -2262,7 +2617,8 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
     <div className="flex flex-col h-full" style={{ background: T.bg }}>
 
       {/* ── Header sticky ── */}
-      <div className="sticky top-0 z-20 px-4 pt-5 pb-0"
+      <div className="safe-top sticky top-0 z-20 px-4 pt-5 pb-0"
+        data-tutorial="offerte-header"
         style={{ background: 'rgba(249,248,244,0.92)', backdropFilter: 'blur(14px)', borderBottom: `1px solid ${T.border}` }}>
 
         {/* Logo + totale */}
@@ -2284,7 +2640,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
           <Search size={15} strokeWidth={1.5} className="absolute left-3.5 top-1/2 -translate-y-1/2" style={{ color: T.textSec }} />
           <input
             type="text"
-            className="w-full pl-9 pr-4 py-2.5 rounded-2xl text-sm outline-none"
+            className="w-full pl-9 pr-4 py-2.5 rounded-2xl text-base outline-none"
             style={{ background: T.surface, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
             placeholder="Cerca pasta, latte, carne..."
             value={searchQuery}
@@ -2339,6 +2695,7 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
         {/* Filtro per insegna — chip scrollabili */}
         {insegneOfferte.length > 1 && (
           <div className="flex gap-2 overflow-x-auto hide-scrollbar px-4 py-2.5"
+            data-tutorial="filtro-insegna"
             style={{ borderBottom: `1px solid ${T.border}`, background: 'rgba(249,248,244,0.92)', backdropFilter: 'blur(14px)' }}>
             <button
               onClick={() => setFiltroInsegna(null)}
@@ -2518,12 +2875,74 @@ const TabOfferte = ({ offerte, archivio = [] }) => {
 const normalizzaLista = (items) =>
   [...items].map(i => i.toLowerCase().trim()).sort().join('|');
 
+const LISTA_INIT = {
+  budgetInput:     '',
+  budgetEditing:   false,
+  listaText:       (() => {
+    try {
+      const params  = new URLSearchParams(window.location.search);
+      const listaUrl = params.get('lista');
+      if (listaUrl) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('lista');
+        window.history.replaceState({}, '', url.toString());
+        return decodeURIComponent(listaUrl).split(',').join('\n');
+      }
+    } catch {}
+    try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; }
+    catch { return ''; }
+  })(),
+  risultato:       null,
+  isAnalyzing:     false,
+  copiatoFeedback: false,
+  vistaStorico:    false,
+  storicoListe:    (() => { try { return JSON.parse(localStorage.getItem('lenticchia_storico_v2') || '[]'); } catch { return []; } })(),
+  listaCaricata:   false,
+};
+
+function listaReducer(state, action) {
+  switch (action.type) {
+    case 'SET_BUDGET_INPUT':    return { ...state, budgetInput: action.payload };
+    case 'SET_BUDGET_EDITING':  return { ...state, budgetEditing: action.payload };
+    case 'SET_LISTA_TEXT':      return { ...state, listaText: action.payload };
+    case 'SET_RISULTATO':       return { ...state, risultato: action.payload };
+    case 'SET_ANALYZING':       return { ...state, isAnalyzing: action.payload };
+    case 'SET_COPIATO':         return { ...state, copiatoFeedback: action.payload };
+    case 'SET_VISTA_STORICO':   return { ...state, vistaStorico: action.payload };
+    case 'SET_STORICO':         return { ...state, storicoListe: action.payload };
+    case 'SET_LISTA_CARICATA':  return { ...state, listaCaricata: action.payload };
+    case 'RESET_BUDGET':        return { ...state, budgetInput: '', budgetEditing: false };
+    default:                    return state;
+  }
+}
+
 const TabListaSpesa = ({ offerte, archivio = [] }) => {
   const { isLoggedIn, listaSpesa, aggiornaListaSpesa, preferenze, aggiornaPreferenze, prodottiPreferiti } = useAuth();
+  const [ls, dispatchLista] = React.useReducer(listaReducer, LISTA_INIT);
+
+  // Alias leggibili per il JSX
+  const budgetInput     = ls.budgetInput;
+  const budgetEditing   = ls.budgetEditing;
+  const listaText       = ls.listaText;
+  const risultato       = ls.risultato;
+  const isAnalyzing     = ls.isAnalyzing;
+  const copiatoFeedback = ls.copiatoFeedback;
+  const vistaStorico    = ls.vistaStorico;
+  const storicoListe    = ls.storicoListe;
+  const listaCaricata   = ls.listaCaricata;
+
+  // Setter compatibili con il resto del componente
+  const setBudgetInput     = (v) => dispatchLista({ type: 'SET_BUDGET_INPUT',   payload: v });
+  const setBudgetEditing   = (v) => dispatchLista({ type: 'SET_BUDGET_EDITING', payload: v });
+  const setListaText       = (v) => dispatchLista({ type: 'SET_LISTA_TEXT',     payload: v });
+  const setRisultato       = (v) => dispatchLista({ type: 'SET_RISULTATO',      payload: v });
+  const setIsAnalyzing     = (v) => dispatchLista({ type: 'SET_ANALYZING',      payload: v });
+  const setCopiatoFeedback = (v) => dispatchLista({ type: 'SET_COPIATO',        payload: v });
+  const setVistaStorico    = (v) => dispatchLista({ type: 'SET_VISTA_STORICO',  payload: v });
+  const setStoricoListe    = (v) => dispatchLista({ type: 'SET_STORICO',        payload: typeof v === 'function' ? v(storicoListe) : v });
+  const setListaCaricata   = (v) => dispatchLista({ type: 'SET_LISTA_CARICATA', payload: v });
 
   // ── Budget mensile ────────────────────────────────────────────────────────
-  const [budgetInput, setBudgetInput]     = useState('');
-  const [budgetEditing, setBudgetEditing] = useState(false);
   const budgetSalvato = preferenze?.budget_mensile || null;
 
   const apriEditBudget = () => {
@@ -2541,24 +2960,10 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
     const nuove = { ...preferenze };
     delete nuove.budget_mensile;
     await aggiornaPreferenze(nuove);
-    setBudgetInput('');
-    setBudgetEditing(false);
+    dispatchLista({ type: 'RESET_BUDGET' });
   };
 
-  const [listaText, setListaText] = useState(() => {
-    try { return localStorage.getItem('lenticchia_lista') || "pane\nfusilli\nlatte parzialmente scremato\nfiletto di maiale"; } catch { return ""; }
-  });
-  const [risultato, setRisultato] = useState(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [vistaStorico, setVistaStorico] = useState(false); // toggle pannello storico
-
-  // Storico strutturato: { id, items[], vincitore, totale, usata, ultimaData }
-  const [storicoListe, setStoricoListe] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('lenticchia_storico_v2') || '[]'); } catch { return []; }
-  });
-
   // Sync lista da cloud al primo caricamento
-  const [listaCaricata, setListaCaricata] = useState(false);
   useEffect(() => {
     if (isLoggedIn && listaSpesa?.items?.length && !listaCaricata) {
       setListaText(listaSpesa.items.join('\n'));
@@ -2739,7 +3144,7 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
                   onChange={e => setBudgetInput(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && salvaBudget()}
                   autoFocus
-                  className="flex-1 px-2.5 py-1 rounded-lg text-sm outline-none"
+                  className="flex-1 px-2.5 py-1 rounded-lg text-base outline-none"
                   style={{ background: 'rgba(255,255,255,0.9)', color: '#2C3026', maxWidth: '100px' }}
                   placeholder="es. 300"
                 />
@@ -2871,6 +3276,7 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
             </div>
 
             <textarea
+              data-tutorial="lista-textarea"
               className="w-full p-4 rounded-2xl text-sm resize-none outline-none"
               style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif", minHeight: '140px' }}
               value={listaText}
@@ -2897,17 +3303,60 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
               );
             })()}
 
-            <button
-              onClick={analizzaSpesa}
-              disabled={isAnalyzing || !listaText.trim()}
-              className="w-full mt-4 text-white font-medium py-3.5 px-4 rounded-[20px] transition-all disabled:opacity-50 flex justify-center items-center gap-2 active:scale-[0.98]"
-              style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: `0 8px 20px rgba(44,48,38,0.2)` }}
-            >
-              {isAnalyzing
-                ? <span className="animate-pulse">Cerco...</span>
-                : <><Search size={16} strokeWidth={1.5} /> Cerca offerte</>
-              }
-            </button>
+            {/* Riga bottoni: Condividi + Cerca offerte */}
+            <div className="flex gap-2 mt-4">
+
+              {/* Bottone Condividi — attivo solo se c'è qualcosa nella lista */}
+              <button
+                onClick={async () => {
+                  const items = listaText.split('\n').map(i => i.trim()).filter(Boolean);
+                  if (!items.length) return;
+                  const testoLista = `📝 Lista della spesa\n${items.map(i => `• ${i}`).join('\n')}\n\n_inviata con Lenticchia 🌿_`;
+                  const url = `${window.location.origin}?lista=${encodeURIComponent(items.join(','))}`;
+
+                  // Prova Web Share API (mobile nativo)
+                  if (navigator.share) {
+                    try {
+                      await navigator.share({ title: 'Lista della spesa', text: testoLista, url });
+                      return;
+                    } catch { /* annullato dall'utente — fallback silenzioso */ }
+                  }
+                  // Fallback: copia link negli appunti
+                  try {
+                    await navigator.clipboard.writeText(url);
+                    setCopiatoFeedback(true);
+                    setTimeout(() => setCopiatoFeedback(false), 2000);
+                  } catch {
+                    // Ultimo fallback: copia il testo
+                    await navigator.clipboard.writeText(testoLista).catch(() => {});
+                    setCopiatoFeedback(true);
+                    setTimeout(() => setCopiatoFeedback(false), 2000);
+                  }
+                }}
+                disabled={!listaText.trim()}
+                className="py-3.5 px-4 rounded-[20px] transition-all disabled:opacity-30 flex justify-center items-center gap-2 active:scale-[0.98] shrink-0"
+                style={{ background: copiatoFeedback ? '#EEF2E4' : T.bg,
+                         border: `1.5px solid ${copiatoFeedback ? T.primary : T.border}`,
+                         color: copiatoFeedback ? T.primary : T.textSec }}>
+                {copiatoFeedback
+                  ? <><Check size={16} strokeWidth={2} /> Copiato!</>
+                  : <Share2 size={16} strokeWidth={1.5} />
+                }
+              </button>
+
+              <button
+                data-tutorial="bottone-analizza"
+                onClick={analizzaSpesa}
+                disabled={isAnalyzing || !listaText.trim()}
+                className="flex-1 text-white font-medium py-3.5 px-4 rounded-[20px] transition-all disabled:opacity-50 flex justify-center items-center gap-2 active:scale-[0.98]"
+                style={{ background: T.textPrimary, fontFamily: "'DM Sans', sans-serif", boxShadow: `0 8px 20px rgba(44,48,38,0.2)` }}
+              >
+                {isAnalyzing
+                  ? <span className="animate-pulse">Cerco...</span>
+                  : <><Search size={16} strokeWidth={1.5} /> Cerca offerte</>
+                }
+              </button>
+            </div>
           </div>
         )}
 
@@ -3082,9 +3531,460 @@ const TabStato = ({ statoVolantini }) => (
 
 // ─── Tab Supermercati ─────────────────────────────────────────────────────────
 
+// ─── Info Insegne — hook + componenti ────────────────────────────────────────
+
+// Struttura vuota di default per il form
+const INFO_VUOTA = {
+  buoni_pasto: { accettati: false, circuiti: [], note: '' },
+  pagamenti:   { contanti: true, bancomat: true, carta: true, contactless: true, satispay: false },
+  promozioni_flat: [],
+};
+
+const useInfoInsegna = (insegna, città) => {
+  const [info, setInfo]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const { utente, profilo }   = useAuth();
+
+  const docId = `${città}_${(insegna || '').replace(/[^a-zA-Z0-9]/g, '_')}`;
+
+  useEffect(() => {
+    if (!insegna || !città) { setLoading(false); return; }
+    let mounted = true;
+    setLoading(true);
+    getDoc(doc(db, 'info_insegne', docId))
+      .then(snap => { if (mounted) setInfo(snap.exists() ? { id: snap.id, ...snap.data() } : null); })
+      .catch(() => { if (mounted) setInfo(null); })
+      .finally(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [insegna, città, docId]);
+
+  const votaProposta = async () => {
+    if (!utente || !info?.proposta) return;
+    const uid     = utente.uid;
+    const isGuru  = (profilo?.punti || 0) >= 1000;
+    const docRef  = doc(db, 'info_insegne', docId);
+
+    try {
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(docRef);
+        if (!snap.exists()) throw new Error('documento non trovato');
+        const proposta = snap.data().proposta;
+        if (!proposta) throw new Error('nessuna proposta attiva');
+
+        // Evita doppio voto — controlla i dati freschi da Firestore, non dallo state
+        if (proposta.voti_guru?.includes(uid) || proposta.voti_utenti?.includes(uid)) {
+          throw new Error('già votato');
+        }
+
+        const nuoviVotiGuru   = isGuru ? [...(proposta.voti_guru || []), uid] : (proposta.voti_guru || []);
+        const nuoviVotiUtenti = !isGuru ? [...(proposta.voti_utenti || []), uid] : (proposta.voti_utenti || []);
+        const soglia  = proposta.tipo === 'nuova' ? 3 : 5;
+        const approvata = nuoviVotiGuru.length >= 1 || nuoviVotiUtenti.length >= soglia;
+
+        if (approvata) {
+          tx.set(docRef, {
+            insegna, città,
+            dati: proposta.dati,
+            n_conferme: nuoviVotiGuru.length + nuoviVotiUtenti.length,
+            ultima_modifica: serverTimestamp(),
+            modificata_da: uid,
+            proposta: null,
+            stato: 'attivo',
+          });
+        } else {
+          // arrayUnion garantisce atomicità anche con scritture concorrenti
+          tx.update(docRef, {
+            'proposta.voti_guru':   isGuru  ? arrayUnion(uid) : proposta.voti_guru || [],
+            'proposta.voti_utenti': !isGuru ? arrayUnion(uid) : proposta.voti_utenti || [],
+          });
+        }
+      });
+      // Ricarica stato locale
+      const snap = await getDoc(docRef);
+      setInfo(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+    } catch (err) {
+      if (err.message !== 'già votato') console.error('Errore voto:', err);
+    }
+  };
+
+  const inviaProposta = async (nuoviDati) => {
+    if (!utente) return;
+    try {
+      const docRef = doc(db, 'info_insegne', docId);
+      const snap = await getDoc(docRef);
+      const datoAttuale = snap.exists() ? snap.data() : null;
+      if (datoAttuale?.proposta?.stato === 'pending') {
+        alert('C\'è già una proposta in attesa di approvazione per questa insegna. Votala prima di proporne un\'altra.');
+        return;
+      }
+      const tipo = datoAttuale?.dati ? 'modifica' : 'nuova';
+      await setDoc(docRef, {
+        insegna, città,
+        dati: datoAttuale?.dati || null,
+        proposta: {
+          dati: nuoviDati,
+          tipo,
+          uid_proponente: utente.uid,
+          data_proposta:  serverTimestamp(),
+          voti_guru:   [],
+          voti_utenti: [],
+          stato: 'pending',
+        },
+        stato: datoAttuale?.stato || 'proposta',
+      }, { merge: true });
+      const snapAggiornato = await getDoc(docRef);
+      setInfo(snapAggiornato.exists() ? { id: snapAggiornato.id, ...snapAggiornato.data() } : null);
+    } catch (err) {
+      console.error('Errore invio proposta:', err);
+      alert('Errore durante l\'invio della proposta. Controlla la connessione e riprova.');
+    }
+  };
+
+  return { info, loading, votaProposta, inviaProposta, docId };
+};
+
+
+// Form proposta info insegna
+const FormPropostaInfo = ({ insegna, infoEsistente, onInvia, onAnnulla }) => {
+  const [dati, setDati] = useState(infoEsistente || INFO_VUOTA);
+  const [promoTesto, setPromoTesto] = useState('');
+  const [salvando, setSalvando] = useState(false);
+
+  const CIRCUITI = ['Ticket Restaurant', 'Edenred', 'Sodexo', 'Day', 'Coverflex', 'Hipe'];
+
+  const toggleCircuito = useCallback((c) => {
+    setDati(prev => ({
+      ...prev,
+      buoni_pasto: {
+        ...prev.buoni_pasto,
+        circuiti: prev.buoni_pasto.circuiti?.includes(c)
+          ? prev.buoni_pasto.circuiti.filter(x => x !== c)
+          : [...(prev.buoni_pasto.circuiti || []), c],
+      }
+    }));
+  }, []);
+
+  const aggiungiPromo = useCallback(() => {
+    if (!promoTesto.trim()) return;
+    setDati(prev => ({
+      ...prev,
+      promozioni_flat: [...(prev.promozioni_flat || []), { regola: promoTesto.trim() }]
+    }));
+    setPromoTesto('');
+  }, [promoTesto]);
+
+  const rimuoviPromo = useCallback((i) => {
+    setDati(prev => ({
+      ...prev,
+      promozioni_flat: prev.promozioni_flat.filter((_, idx) => idx !== i)
+    }));
+  }, []);
+
+  const submit = async () => {
+    setSalvando(true);
+    await onInvia(dati);
+    setSalvando(false);
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* Buoni pasto */}
+      <div className="rounded-[16px] p-4" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+        <h4 className="text-sm font-semibold mb-3" style={{ color: T.textPrimary }}>🎟️ Buoni pasto</h4>
+        <div className="flex items-center gap-3 mb-3">
+          <button onClick={() => setDati(p => ({ ...p, buoni_pasto: { ...p.buoni_pasto, accettati: true } }))}
+            className="flex-1 py-2 rounded-xl text-sm font-medium transition-all"
+            style={dati.buoni_pasto.accettati
+              ? { background: T.primary, color: '#fff' }
+              : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+            ✅ Accettati
+          </button>
+          <button onClick={() => setDati(p => ({ ...p, buoni_pasto: { ...p.buoni_pasto, accettati: false, circuiti: [] } }))}
+            className="flex-1 py-2 rounded-xl text-sm font-medium transition-all"
+            style={!dati.buoni_pasto.accettati
+              ? { background: '#FEE2E2', color: '#DC2626' }
+              : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+            ❌ Non accettati
+          </button>
+        </div>
+        {dati.buoni_pasto.accettati && (
+          <>
+            <p className="text-xs mb-2" style={{ color: T.textSec }}>Circuiti accettati:</p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {CIRCUITI.map(c => (
+                <button key={c} onClick={() => toggleCircuito(c)}
+                  className="px-3 py-1 rounded-full text-xs font-medium transition-all"
+                  style={dati.buoni_pasto.circuiti?.includes(c)
+                    ? { background: T.primary, color: '#fff' }
+                    : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                  {c}
+                </button>
+              ))}
+            </div>
+            <input type="text" placeholder="Note (es. min €5, non dopo le 20:00)"
+              value={dati.buoni_pasto.note || ''}
+              onChange={e => setDati(p => ({ ...p, buoni_pasto: { ...p.buoni_pasto, note: e.target.value } }))}
+              className="w-full px-3 py-2 rounded-xl text-base outline-none"
+              style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }} />
+          </>
+        )}
+      </div>
+
+      {/* Metodi di pagamento */}
+      <div className="rounded-[16px] p-4" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+        <h4 className="text-sm font-semibold mb-3" style={{ color: T.textPrimary }}>💳 Metodi di pagamento</h4>
+        <div className="flex flex-wrap gap-2">
+          {[
+            { key: 'contanti', label: '💵 Contanti' },
+            { key: 'bancomat', label: '💳 Bancomat' },
+            { key: 'carta', label: '💳 Carta credito' },
+            { key: 'contactless', label: '📱 Contactless' },
+            { key: 'satispay', label: '🟡 Satispay' },
+          ].map(({ key, label }) => (
+            <button key={key}
+              onClick={() => setDati(p => ({ ...p, pagamenti: { ...p.pagamenti, [key]: !p.pagamenti?.[key] } }))}
+              className="px-3 py-1.5 rounded-full text-xs font-medium transition-all"
+              style={dati.pagamenti?.[key]
+                ? { background: T.primary, color: '#fff' }
+                : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Promozioni flat */}
+      <div className="rounded-[16px] p-4" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+        <h4 className="text-sm font-semibold mb-3" style={{ color: T.textPrimary }}>📅 Promozioni fisse</h4>
+        {(dati.promozioni_flat || []).map((p, i) => (
+          <div key={i} className="flex items-center gap-2 mb-2">
+            <span className="flex-1 text-sm px-3 py-2 rounded-xl"
+              style={{ background: '#EEF2E4', color: T.textPrimary }}>{p.regola}</span>
+            <button onClick={() => rimuoviPromo(i)}
+              className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+              style={{ background: '#FEE2E2', color: '#DC2626' }}>
+              <X size={12} strokeWidth={2} />
+            </button>
+          </div>
+        ))}
+        <div className="flex gap-2 mt-2">
+          <input type="text"
+            placeholder='Es. "10% pensionati martedì mattina"'
+            value={promoTesto}
+            onChange={e => setPromoTesto(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && aggiungiPromo()}
+            className="flex-1 px-3 py-2 rounded-xl text-base outline-none"
+            style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }} />
+          <button onClick={aggiungiPromo}
+            className="px-3 py-2 rounded-xl text-sm font-medium"
+            style={{ background: T.primary, color: '#fff' }}>
+            +
+          </button>
+        </div>
+        <p className="text-[10px] mt-2" style={{ color: T.textSec }}>
+          Scrivi la regola in modo leggibile — verrà mostrata testualmente agli utenti
+        </p>
+      </div>
+
+      {/* Bottoni */}
+      <div className="flex gap-3">
+        <button onClick={onAnnulla}
+          className="flex-1 py-3 rounded-[16px] text-sm font-medium"
+          style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+          Annulla
+        </button>
+        <button onClick={submit} disabled={salvando}
+          className="flex-1 py-3 rounded-[16px] text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+          style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+          {salvando
+            ? <><Loader size={14} strokeWidth={1.5} className="animate-spin" /> Invio...</>
+            : <><Check size={14} strokeWidth={2} /> Invia proposta</>}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+
+// Pannello info insegna — mostrato nella scheda dettaglio in TabSupermercati
+const PannelloInfoInsegna = ({ insegna, città }) => {
+  const { info, loading, votaProposta, inviaProposta } = useInfoInsegna(insegna, città);
+  const { utente, profilo, isEleggibilePerCittà } = useAuth();
+  const [mostraForm, setMostraForm] = useState(false);
+  const isGuru     = (profilo?.punti || 0) >= 1000;
+  const eleggibile = città ? isEleggibilePerCittà(città) : false;
+  const puoProporre = utente && (isGuru || eleggibile);
+
+  // Città non ancora impostata nel profilo
+  if (!città) return (
+    <div className="px-5 py-4">
+      <p className="text-xs" style={{ color: T.textSec }}>
+        💳 Imposta la tua città nel profilo per vedere e contribuire alle info pagamenti.
+      </p>
+    </div>
+  );
+
+  // Voto già dato?
+  const haVotato = utente && info?.proposta && (
+    info.proposta.voti_guru?.includes(utente.uid) ||
+    info.proposta.voti_utenti?.includes(utente.uid)
+  );
+
+  if (loading) return (
+    <div className="flex items-center gap-2 py-4 px-5">
+      <Loader size={14} strokeWidth={1.5} className="animate-spin" style={{ color: T.textSec }} />
+      <span className="text-xs" style={{ color: T.textSec }}>Carico info pagamenti...</span>
+    </div>
+  );
+
+  if (mostraForm) return (
+    <div className="px-4 pb-4">
+      <h3 className="text-sm font-semibold mb-3 pt-4" style={{ color: T.textPrimary }}>
+        {info?.dati ? '✏️ Proponi modifica' : '➕ Aggiungi info pagamenti'}
+      </h3>
+      <FormPropostaInfo
+        insegna={insegna}
+        infoEsistente={info?.dati || null}
+        onInvia={async (dati) => { await inviaProposta(dati); setMostraForm(false); }}
+        onAnnulla={() => setMostraForm(false)}
+      />
+    </div>
+  );
+
+  return (
+    <div className="px-4 pb-4">
+      <div className="flex items-center justify-between pt-4 mb-3">
+        <h3 className="text-sm font-semibold" style={{ color: T.textPrimary }}>
+          💳 Pagamenti & promozioni
+        </h3>
+        {puoProporre && (
+          <button onClick={() => setMostraForm(true)}
+            className="text-xs px-3 py-1 rounded-full font-medium"
+            style={{ background: '#EEF2E4', color: T.primary }}>
+            {info?.dati ? 'Modifica' : 'Aggiungi'}
+          </button>
+        )}
+        {!puoProporre && utente && (
+          <span className="text-[10px]" style={{ color: T.textSec }}>
+            {isGuru ? '' : `Servono scontrini da ${città}`}
+          </span>
+        )}
+      </div>
+
+      {!info?.dati && !info?.proposta && (
+        <div className="rounded-[14px] p-4 text-center"
+          style={{ background: T.bg, border: `1px dashed ${T.border}` }}>
+          <p className="text-sm" style={{ color: T.textSec }}>
+            Nessuna info ancora — sei stato qui di recente?
+          </p>
+          {!utente && (
+            <p className="text-xs mt-1" style={{ color: T.textSec }}>Accedi per aggiungere info</p>
+          )}
+        </div>
+      )}
+
+      {info?.dati && (
+        <div className="space-y-3">
+          {/* Buoni pasto */}
+          <div className="rounded-[14px] p-3" style={{ background: T.bg }}>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-sm">🎟️</span>
+              <span className="text-sm font-medium" style={{ color: T.textPrimary }}>Buoni pasto</span>
+              <span className="text-xs font-semibold ml-auto"
+                style={{ color: info.dati.buoni_pasto?.accettati ? T.primary : '#DC2626' }}>
+                {info.dati.buoni_pasto?.accettati ? '✅ Accettati' : '❌ Non accettati'}
+              </span>
+            </div>
+            {info.dati.buoni_pasto?.accettati && info.dati.buoni_pasto?.circuiti?.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {info.dati.buoni_pasto.circuiti.map(c => (
+                  <span key={c} className="text-[10px] px-2 py-0.5 rounded-full"
+                    style={{ background: '#EEF2E4', color: T.primary }}>{c}</span>
+                ))}
+              </div>
+            )}
+            {info.dati.buoni_pasto?.note && (
+              <p className="text-[11px] mt-1.5" style={{ color: T.textSec }}>
+                {info.dati.buoni_pasto.note}
+              </p>
+            )}
+          </div>
+
+          {/* Metodi pagamento */}
+          {info.dati.pagamenti && (
+            <div className="rounded-[14px] p-3" style={{ background: T.bg }}>
+              <p className="text-xs font-medium mb-2" style={{ color: T.textSec }}>💳 Metodi accettati</p>
+              <div className="flex flex-wrap gap-1">
+                {[
+                  { key: 'contanti', label: '💵 Contanti' },
+                  { key: 'bancomat', label: '💳 Bancomat' },
+                  { key: 'carta', label: '💳 Credito' },
+                  { key: 'contactless', label: '📱 Contactless' },
+                  { key: 'satispay', label: '🟡 Satispay' },
+                ].filter(({ key }) => info.dati.pagamenti[key]).map(({ label }, i) => (
+                  <span key={i} className="text-[10px] px-2 py-0.5 rounded-full"
+                    style={{ background: '#EEF2E4', color: T.primary }}>{label}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Promozioni flat */}
+          {info.dati.promozioni_flat?.length > 0 && (
+            <div className="rounded-[14px] p-3" style={{ background: T.bg }}>
+              <p className="text-xs font-medium mb-2" style={{ color: T.textSec }}>📅 Promozioni fisse</p>
+              <div className="space-y-1.5">
+                {info.dati.promozioni_flat.map((p, i) => (
+                  <p key={i} className="text-sm" style={{ color: T.textPrimary }}>• {p.regola}</p>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Badge validazione */}
+          <p className="text-[10px] text-center" style={{ color: T.textSec }}>
+            Verificato da {info.n_conferme} utent{info.n_conferme === 1 ? 'e' : 'i'} · {città}
+          </p>
+        </div>
+      )}
+
+      {/* Proposta in attesa */}
+      {info?.proposta && (
+        <div className="mt-3 rounded-[14px] p-4"
+          style={{ background: '#FEF3C7', border: '1px solid #FDE68A' }}>
+          <p className="text-xs font-semibold mb-1" style={{ color: '#92400E' }}>
+            📋 Proposta in attesa di verifica
+          </p>
+          <p className="text-[11px] mb-3" style={{ color: '#A16207' }}>
+            {info.proposta.tipo === 'nuova' ? 'Nuova info' : 'Modifica'} ·{' '}
+            {info.proposta.voti_guru?.length} Guru, {info.proposta.voti_utenti?.length} utenti —{' '}
+            serve {info.proposta.tipo === 'nuova' ? '1 Guru o 3 utenti' : '1 Guru o 5 utenti'}
+          </p>
+          {utente && !haVotato && (isGuru || eleggibile) && (
+            <button onClick={() => votaProposta('conferma')}
+              className="w-full py-2 rounded-xl text-xs font-semibold"
+              style={{ background: '#92400E', color: '#fff' }}>
+              ✓ Confermo — le info sono corrette
+            </button>
+          )}
+          {haVotato && (
+            <p className="text-xs text-center" style={{ color: '#92400E' }}>✓ Hai già votato</p>
+          )}
+          {utente && !isGuru && !eleggibile && (
+            <p className="text-xs text-center" style={{ color: '#A16207' }}>
+              Servono scontrini da {città} per votare
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const TabSupermercati = ({ offerte, statoVolantini }) => {
   const [selectedInsegna, setSelectedInsegna] = useState(null);
   const { segnalati, segnala } = useSegnalazioniStore();
+  const { cittàAttiva } = useAuth();
 
   if (selectedInsegna) {
     const storeOffers = offerte.filter(o => o.insegna === selectedInsegna && !o.nascosto).sort((a, b) => a.prezzo - b.prezzo);
@@ -3100,8 +4000,17 @@ const TabSupermercati = ({ offerte, statoVolantini }) => {
             <p className="text-xs opacity-80">{storeOffers.length} offerte disponibili</p>
           </div>
         </div>
-        <div className="p-4 overflow-y-auto flex-1">
-          {storeOffers.map((o, i) => <ProductCard key={o.id} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />)}
+        <div className="overflow-y-auto flex-1">
+          {/* Pannello info pagamenti — sopra le offerte */}
+          <div className="rounded-[20px] mx-4 mt-4 overflow-hidden"
+            style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 4px 16px rgba(44,48,38,0.06)' }}>
+            <PannelloInfoInsegna insegna={selectedInsegna} città={cittàAttiva} />
+          </div>
+
+          {/* Lista offerte */}
+          <div className="p-4">
+            {storeOffers.map((o, i) => <ProductCard key={o.id} offerta={o} index={i} segnalati={segnalati} segnala={segnala} />)}
+          </div>
         </div>
       </div>
     );
@@ -3109,7 +4018,7 @@ const TabSupermercati = ({ offerte, statoVolantini }) => {
 
   return (
     <div className="flex flex-col h-full pb-28" style={{ background: T.bg }}>
-      <div className="px-5 pt-8 pb-5 sticky top-0 z-10" style={{ background: 'rgba(249,248,244,0.85)', backdropFilter: 'blur(12px)', borderBottom: `1px solid ${T.border}` }}>
+      <div className="px-5 pt-8 pb-5 safe-top sticky top-0 z-10" style={{ background: 'rgba(249,248,244,0.85)', backdropFilter: 'blur(12px)', borderBottom: `1px solid ${T.border}` }}>
         <h2 style={{ fontFamily: "'Lora', serif", fontSize: '22px', fontWeight: 500, color: T.textPrimary }}>Negozi</h2>
         <p className="text-sm mt-1" style={{ color: T.textSec }}>Sfoglia per insegna.</p>
       </div>
@@ -3418,7 +4327,7 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
     <div className="flex flex-col h-full pb-32 overflow-y-auto hide-scrollbar" style={{ background: T.bg }}>
 
       {/* Header */}
-      <div className="px-5 pt-8 pb-4 sticky top-0 z-10"
+      <div className="px-5 pt-8 pb-4 safe-top sticky top-0 z-10"
         style={{ background: 'rgba(249,248,244,0.9)', backdropFilter: 'blur(12px)', borderBottom: `1px solid ${T.border}` }}>
         <div className="flex items-center justify-between mb-3">
           <div>
@@ -3950,7 +4859,7 @@ const TabSpese = ({ scontriniReali = [], dataLoaded = false }) => {
                           onChange={e => aggiornaNomeNorm(idx, e.target.value)}
                           placeholder={nomeRaw}
                           autoFocus
-                          className="w-full px-3 py-2.5 rounded-xl text-sm outline-none"
+                          className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
                           style={{ background: T.bg, border: `1px solid ${T.primary}`, color: T.textPrimary }}
                         />
                         <p className="text-[10px] mt-1.5" style={{ color: T.textSec }}>
@@ -4017,7 +4926,7 @@ const PUNTI_BONUS_SETTIMANA  = 5;   // primo scontrino della settimana
 const calcolaLivello = (p = 0) => getLivello(p).nome;
 
 const TabValidazioneScontrini = ({ scontriniDaValidare, onValidatoOk }) => {
-  const { utente } = useAuth();
+  const { utente, aggiornaScontriniPerCittà } = useAuth();
 
   // Quale scontrino stiamo revisionando (indice)
   const [indice, setIndice]             = useState(0);
@@ -4156,6 +5065,9 @@ const TabValidazioneScontrini = ({ scontriniDaValidare, onValidatoOk }) => {
 
       setPuntiAnimati(punti);
       setStato('salvato');
+
+      // Aggiorna contatore scontrini per città (usato per eleggibilità info insegne)
+      if (scontrino.città) aggiornaScontriniPerCittà(scontrino.città);
 
       // ── C: se ci sono prodotti specifici → mostra modal condivisione ──
       if (nSpecifici > 0) {
@@ -4426,7 +5338,7 @@ const TabValidazioneScontrini = ({ scontriniDaValidare, onValidatoOk }) => {
                       type={tipo}
                       value={estratto[campo] || ''}
                       onChange={e => aggiornaCampoTestata(campo, e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                      className="w-full px-3 py-2 rounded-xl text-base outline-none"
                       style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, fontFamily: "'DM Sans', sans-serif" }}
                     />
                   </div>
@@ -4640,7 +5552,28 @@ const TabValidazioneScontrini = ({ scontriniDaValidare, onValidatoOk }) => {
 // ─── App principale ───────────────────────────────────────────────────────────
 
 function AppInterna() {
-  const [activeTab, setActiveTab] = useState('lista');
+  const { utente, profilo, preferenze, loading: authLoading, completaOnboarding,
+          completaOnboardingSupermercati, cittàAttiva, impostaCittàRegistrazione,
+          completaTutorial, riavviaTutorial } = useAuth();
+
+  // Legge ?tab= dall'URL — usato dagli shortcuts del manifest PWA
+  const tabDaUrl = (() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const t = params.get('tab');
+      const validi = ['offerte', 'negozi', 'lista', 'scontrino', 'spese', 'profilo'];
+      if (t && validi.includes(t)) {
+        // Rimuove il param senza reload
+        const url = new URL(window.location.href);
+        url.searchParams.delete('tab');
+        window.history.replaceState({}, '', url.toString());
+        return t;
+      }
+    } catch {}
+    return null;
+  })();
+
+  const [activeTab, setActiveTab] = useState(tabDaUrl || (utente ? 'lista' : 'offerte'));
   const [offerte, setOfferte] = useState([]);
   const [statoVolantini, setStatoVolantini] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4648,14 +5581,22 @@ function AppInterna() {
   const [archivio, setArchivio] = useState([]);
   const [scontriniUtente, setScontriniUtente] = useState([]);
   const [scontriniDaValidare, setScontriniDaValidare] = useState([]);
-  const { utente, profilo, preferenze, loading: authLoading, completaOnboarding, completaOnboardingSupermercati } = useAuth();
+  const [swUpdateAvailable, setSwUpdateAvailable] = useState(false); // banner aggiornamento PWA
+
+  // Ascolta l'evento di aggiornamento del Service Worker
+  useEffect(() => {
+    const onSwUpdate = () => setSwUpdateAvailable(true);
+    window.addEventListener('sw-update-available', onSwUpdate);
+    return () => window.removeEventListener('sw-update-available', onSwUpdate);
+  }, []);
 
   // ─── Carica scontrini da_validare (badge + UI validazione) ──────────────────
   // Si ricarica: al mount, quando cambia utente, e quando l'utente torna
   // al tab Scontrino (activeTab === 'scontrino') per aggiornare il badge.
   useEffect(() => {
     if (!utente) return;
-    if (activeTab !== 'scontrino' && scontriniDaValidare.length > 0) return; // già caricati
+    if (activeTab !== 'scontrino' && scontriniDaValidare.length > 0) return;
+    let mounted = true;
     const caricaDaValidare = async () => {
       try {
         const q = query(
@@ -4665,23 +5606,21 @@ function AppInterna() {
           limit(20)
         );
         const snap = await getDocs(q);
-        setScontriniDaValidare(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        if (mounted) setScontriniDaValidare(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch {
-        setScontriniDaValidare([]);
+        if (mounted) setScontriniDaValidare([]);
       }
     };
     caricaDaValidare();
+    return () => { mounted = false; };
   }, [utente, activeTab]);
 
   // ─── Carica scontrini utente (per tab Spese) ──────────────────────────────
-  // Legge da spese_personali/{uid}/scontrini — contiene TUTTI gli scontrini
-  // inclusi quelli generici (alimentari, rep.panetteria) che non vanno in
-  // prezzi_scontrini ma sono utili per il resoconto mensile.
-  // Si ricarica ogni volta che l'utente apre il tab Spese per avere dati freschi.
   const [scontriniLoaded, setScontriniLoaded] = useState(false);
   useEffect(() => {
     if (!utente) return;
     if (activeTab !== 'spese') return;
+    let mounted = true;
     const caricaScontrini = async () => {
       try {
         const q = query(
@@ -4690,14 +5629,15 @@ function AppInterna() {
           limit(50)
         );
         const snap = await getDocs(q);
-        setScontriniUtente(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        if (mounted) setScontriniUtente(snap.docs.map(d => ({ id: d.id, ...d.data() })));
       } catch {
-        setScontriniUtente([]);
+        if (mounted) setScontriniUtente([]);
       } finally {
-        setScontriniLoaded(true);
+        if (mounted) setScontriniLoaded(true);
       }
     };
     caricaScontrini();
+    return () => { mounted = false; };
   }, [utente, activeTab]);
 
   // ─── Cache helpers ────────────────────────────────────────────────────────
@@ -4801,22 +5741,47 @@ function AppInterna() {
     );
   }
 
-  // ── BETA GATE — rimuovere per il lancio pubblico ──────────────────────────
-  // Per passare al modello ibrido: rimuovere questo blocco e aggiungere
-  // un PrivateRoute solo sui tab 'lista' e 'profilo'.
-  if (!utente) {
-    return (
-      <div className="w-full max-w-md mx-auto min-h-screen relative" style={{ background: T.bg }}>
-        <SchermataLogin />
-      </div>
-    );
-  }
-  // ── FINE BETA GATE ────────────────────────────────────────────────────────
+  // ── MODELLO IBRIDO: Offerte e Negozi sono pubblici, gli altri tab richiedono login ──
 
   if (utente && profilo && profilo.onboarding_completato === false) {
     return (
       <div className="w-full max-w-md mx-auto min-h-screen shadow-2xl relative" style={{ background: T.bg }}>
         <SchermataOnboarding onConferma={completaOnboarding} />
+      </div>
+    );
+  }
+
+  // Step città: dopo la privacy, prima dei supermercati
+  if (utente && profilo && profilo.onboarding_completato && !profilo.città_registrazione) {
+    return (
+      <div className="w-full max-w-md mx-auto min-h-screen shadow-2xl relative flex flex-col items-center justify-center px-8"
+        style={{ background: T.bg }}>
+        <div className="w-20 h-20 rounded-3xl flex items-center justify-center mb-6"
+          style={{ background: '#EEF2E4' }}>
+          <span style={{ fontSize: '40px' }}>📍</span>
+        </div>
+        <h2 className="text-center mb-2"
+          style={{ fontFamily: "'Lora', serif", fontSize: '22px', fontWeight: 500, color: T.textPrimary }}>
+          In quale città fai la spesa?
+        </h2>
+        <p className="text-center text-sm mb-8" style={{ color: T.textSec }}>
+          Vedremo le offerte dei supermercati nella tua zona. Potrai cambiarla in qualsiasi momento dal profilo.
+        </p>
+        <div className="w-full space-y-3">
+          {CITTA_DISPONIBILI.map(c => (
+            <button key={c.id}
+              onClick={() => impostaCittàRegistrazione(c.id)}
+              className="w-full flex items-center gap-4 px-5 py-4 rounded-[20px] transition-all active:scale-[0.98]"
+              style={{ background: T.surface, border: `1px solid ${T.border}`,
+                       boxShadow: '0 4px 16px rgba(44,48,38,0.06)' }}>
+              <span style={{ fontSize: '32px' }}>{c.emoji}</span>
+              <div className="text-left">
+                <p className="font-semibold" style={{ color: T.textPrimary }}>{c.label}</p>
+                <p className="text-xs mt-0.5" style={{ color: T.textSec }}>Offerte e supermercati di {c.label}</p>
+              </div>
+            </button>
+          ))}
+        </div>
       </div>
     );
   }
@@ -4846,6 +5811,7 @@ function AppInterna() {
     {
       id: 'scontrino',
       label: 'Scontrino',
+      dataTutorial: 'tab-scontrino',
       icon: (
         <div className="relative">
           <Camera size={24} strokeWidth={1.5} />
@@ -4859,12 +5825,21 @@ function AppInterna() {
       )
     },
     { id: 'spese',      icon: <Wallet size={24} strokeWidth={1.5} />,   label: 'Spese' },
+    { id: 'negozi',     icon: <MapPin size={24} strokeWidth={1.5} />,   label: 'Negozi', dataTutorial: 'tab-negozi' },
     { id: 'profilo',    icon: utente?.photoURL
         ? <img src={utente.photoURL} alt="avatar" className="w-6 h-6 rounded-full" style={{ border: activeTab === 'profilo' ? `2px solid ${T.primary}` : '2px solid transparent' }} />
         : <User size={24} strokeWidth={1.5} />,
-      label: 'Profilo'
+      label: utente ? 'Profilo' : 'Accedi',
+      dataTutorial: 'tab-profilo',
     },
   ];
+
+  // Tutorial: mostrato dopo tutti gli step di onboarding se non ancora completato
+  const mostraTutorial = utente
+    && profilo?.onboarding_completato
+    && profilo?.città_registrazione
+    && preferenze?.onboarding_supermercati
+    && profilo?.tutorial_completato === false;
 
   return (
     <div className="w-full max-w-md mx-auto min-h-screen relative" style={{ background: T.bg, fontFamily: "'DM Sans', sans-serif", color: T.textPrimary, overflowX: 'hidden' }}>
@@ -4875,21 +5850,60 @@ function AppInterna() {
         </div>
       )}
 
+      {/* Tutorial spotlight — mostrato sopra tutto il resto */}
+      {mostraTutorial && (
+        <Tutorial
+          onCompleta={completaTutorial}
+          onSalta={completaTutorial}
+          setActiveTab={setActiveTab}
+        />
+      )}
+
       <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 6.5rem)' }}>
-        {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} />}
+        {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
         {activeTab === 'negozi'     && <TabSupermercati offerte={offerte} statoVolantini={statoVolantini} />}
-        {activeTab === 'lista'      && <TabListaSpesa offerte={offerte} archivio={archivio} />}
+        {activeTab === 'lista'      && (utente
+          ? <TabListaSpesa offerte={offerte} archivio={archivio} />
+          : <TabLoginRichiesto messaggio="Accedi per gestire la tua lista della spesa e usare il Verdetto Spesa." />
+        )}
         {activeTab === 'stato'      && <TabStato statoVolantini={statoVolantini} />}
-        {activeTab === 'scontrino'  && nDaValidare > 0
-          ? <TabValidazioneScontrini
-              scontriniDaValidare={scontriniDaValidare}
-              onValidatoOk={onScontrinoValidato}
-            />
-          : activeTab === 'scontrino' && <TabScontrino />
-        }
-        {activeTab === 'spese'      && <TabSpese scontriniReali={scontriniUtente} dataLoaded={scontriniLoaded} />}
-        {activeTab === 'profilo'    && <TabProfilo />}
+        {activeTab === 'scontrino'  && (utente
+          ? (nDaValidare > 0
+            ? <TabValidazioneScontrini scontriniDaValidare={scontriniDaValidare} onValidatoOk={onScontrinoValidato} />
+            : <TabScontrino />)
+          : <TabLoginRichiesto messaggio="Accedi per fotografare scontrini e guadagnare punti." />
+        )}
+        {activeTab === 'spese'      && (utente
+          ? <TabSpese scontriniReali={scontriniUtente} dataLoaded={scontriniLoaded} />
+          : <TabLoginRichiesto messaggio="Accedi per vedere il resoconto delle tue spese." />
+        )}
+        {activeTab === 'profilo'    && (utente
+          ? <TabProfilo />
+          : <TabLoginRichiesto messaggio="Accedi per vedere il tuo profilo, i tuoi punti e il tuo livello." />
+        )}
       </div>
+
+      {/* Banner aggiornamento PWA — appare quando il SW segnala una nuova versione */}
+      {swUpdateAvailable && (
+        <div className="absolute bottom-24 left-4 right-4 z-50 rounded-[16px] px-4 py-3 flex items-center gap-3"
+          style={{ background: T.primary, boxShadow: '0 8px 24px rgba(100,113,68,0.4)' }}>
+          <span className="text-base">🌿</span>
+          <p className="flex-1 text-xs font-medium text-white leading-tight">
+            Nuova versione disponibile
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="text-xs font-semibold px-3 py-1.5 rounded-xl transition-all active:scale-95"
+            style={{ background: 'rgba(255,255,255,0.2)', color: '#fff' }}>
+            Aggiorna
+          </button>
+          <button
+            onClick={() => setSwUpdateAvailable(false)}
+            className="text-white opacity-60 text-sm font-medium">
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Floating pill navbar — centrata con absolute dentro il wrapper relativo */}
       <div
@@ -4907,6 +5921,7 @@ function AppInterna() {
           <button
             key={item.id}
             onClick={() => setActiveTab(item.id)}
+            data-tutorial={item.dataTutorial || undefined}
             className="flex flex-col items-center justify-center rounded-full transition-all active:scale-90"
             style={{
               color: activeTab === item.id ? '#fff' : 'rgba(255,255,255,0.4)',

@@ -1,3 +1,75 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ── Fix PWA: comportamento nativo su tutti i dispositivi ─────────────────── */
+
+html, body {
+  /* Fix #4: elimina bounce effect iOS e glow Android quando si scorre oltre il bordo */
+  overscroll-behavior: none;
+
+  /* Altezza corretta su mobile (considera la barra browser) */
+  height: 100%;
+}
+
+body {
+  /* Fix #3: momentum scrolling fluido su iOS per tutti i container scroll */
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Fix #3: applicato a tutti i container scroll dell'app */
+* {
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Fix #6: disabilita selezione testo accidentale su elementi UI interattivi */
+button,
+[role="button"],
+label,
+nav,
+.no-select {
+  -webkit-user-select: none;
+  user-select: none;
+  /* Disabilita highlight al tap su Android Chrome */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Fix #5: safe-area-inset-top per header sticky su iPhone con notch/Dynamic Island */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Assicura che gli input non zoomino su iOS (font-size >= 16px) */
+input, textarea, select {
+  font-size: max(16px, 1em);
+}
+
+/* Smooth scrolling nativo */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Animazioni globali usate nell'app */
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.3s ease-out both;
+}
+
+/* Hide scrollbar mantenendo la funzionalità di scroll */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
