@@ -41,31 +41,6 @@ import {
   Flag,
 } from 'lucide-react';
 
-class ErrorBoundary extends React.Component {
-  constructor(props) { super(props); this.state = { error: null, info: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { this.setState({ info }); }
-  render() {
-    if (this.state.error) {
-      return (
-        <div style={{ padding: '20px', background: '#FEE2E2', minHeight: '100vh', fontFamily: 'monospace' }}>
-          <h2 style={{ color: '#DC2626', fontSize: '16px', marginBottom: '8px' }}>
-            ERROR #310 — Dettaglio:
-          </h2>
-          <pre style={{ color: '#7F1D1D', fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-            {this.state.error?.message}
-          </pre>
-          <pre style={{ color: '#991B1B', fontSize: '11px', whiteSpace: 'pre-wrap', marginTop: '12px' }}>
-            {this.state.info?.componentStack}
-          </pre>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-
 // ─── Font import (Lora + DM Sans via Google Fonts) ───────────────────────────
 // Aggiunto nel <head> di index.html — qui solo il riferimento per chiarezza:
 // <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -2203,7 +2178,7 @@ const TabScontrino = ({ onApriRevisione = null }) => {
         uid:              utente.uid,
         immagini_b64:     foto.map(f => f.base64),
         n_foto:           foto.length,
-        stato:            'in_attesa',
+        stato:            'in_attesa_revisione',
         città:            profilo?.città_attiva || null,
         data_caricamento: serverTimestamp(),
       });
@@ -2445,22 +2420,6 @@ const TabScontrino = ({ onApriRevisione = null }) => {
 
         {/* ── STATO IDLE VOLANTINO ── */}
         {stato === 'idle' && modalita === 'volantino' && (
-          <div className="animate-fade-in-up space-y-4">
-
-            {/* Banner per non-Guru: spiega il flusso */}
-            {!isGuru && (
-              <div className="rounded-[20px] px-4 py-3"
-                style={{ background: '#EEF2E4', border: `1px solid ${T.border}` }}>
-                <p className="text-sm font-medium mb-1" style={{ color: T.primary }}>
-                  📰 Come funziona
-                </p>
-                <p className="text-xs leading-relaxed" style={{ color: T.textSec }}>
-                  Le tue foto vengono revisionate da un Guru prima dell'elaborazione automatica.
-                  I punti (+25) ti vengono accreditati dopo l'approvazione.
-                </p>
-              </div>
-            )}
-
             <div className="animate-fade-in-up space-y-4">
             {/* Card info */}
             <div className="rounded-[24px] p-6"
@@ -2526,8 +2485,10 @@ const TabScontrino = ({ onApriRevisione = null }) => {
               </p>
             </div>
           </div>
-          </div>
+
         )}
+
+        {/* ── STATO ANTEPRIMA
 
         {/* ── STATO ANTEPRIMA (uguale per entrambe le modalità) ── */}
         {stato === 'anteprima' && (
@@ -6820,10 +6781,8 @@ function AppInterna() {
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <AuthProvider>
-        <AppInterna />
-      </AuthProvider>
-    </ErrorBoundary>
+    <AuthProvider>
+      <AppInterna />
+    </AuthProvider>
   );
 }
