@@ -41,29 +41,6 @@ import {
   Flag,
 } from 'lucide-react';
 
-// ── ErrorBoundary per debug crash schermo bianco ─────────────────────────────
-class ErrorBoundary extends React.Component {
-  constructor(props) { super(props); this.state = { error: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
-  render() {
-    if (this.state.error) {
-      return (
-        <div style={{ padding: '20px', background: '#FEE2E2', minHeight: '100vh' }}>
-          <h2 style={{ color: '#DC2626', fontFamily: 'monospace', fontSize: '14px' }}>
-            💥 ERRORE REACT
-          </h2>
-          <pre style={{ color: '#7F1D1D', fontSize: '11px', whiteSpace: 'pre-wrap', marginTop: '8px' }}>
-            {this.state.error?.message}\n\n{this.state.error?.stack?.slice(0, 500)}
-          </pre>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
-
-
 // ─── Font import (Lora + DM Sans via Google Fonts) ───────────────────────────
 // Aggiunto nel <head> di index.html — qui solo il riferimento per chiarezza:
 // <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
@@ -2011,7 +1988,7 @@ function scontrinoReducer(state, action) {
   }
 }
 
-const TabScontrino = () => {
+const TabScontrino = ({ onApriRevisione = null }) => {
   const { utente, profilo } = useAuth();
   const isGuru = (profilo?.punti || 0) >= 1000;
   const [s, dispatch] = React.useReducer(scontrinoReducer, SCONTRINO_INIT);
@@ -2247,7 +2224,7 @@ const TabScontrino = () => {
         n_foto:           foto.length,
         insegna:          insegnaVolantino.trim(),
         valido_fino:      validoFino || null,
-        stato:            'in_attesa',
+        stato:            'in_attesa_revisione',
         città:            profilo?.città_attiva || null,
         data_caricamento: serverTimestamp(),
         posizione_upload: posizioneRilevata
@@ -2300,16 +2277,14 @@ const TabScontrino = () => {
           ].map(m => (
             <button
               key={m.id}
-              onClick={() => m.id === 'volantino' && !isGuru ? null : cambiaModalita(m.id)}
+              onClick={() => cambiaModalita(m.id)}
               className="px-4 py-1.5 rounded-xl text-sm font-medium transition-all"
               style={modalita === m.id
                 ? { background: '#fff', color: T.primary }
-                : m.id === 'volantino' && !isGuru
-                  ? { color: 'rgba(255,255,255,0.35)', cursor: 'default' }
-                  : { color: 'rgba(255,255,255,0.7)' }
+                : { color: 'rgba(255,255,255,0.7)' }
               }
             >
-              {m.label}{m.id === 'volantino' && !isGuru ? ' 🔒' : ''}
+              {m.label}
             </button>
           ))}
         </div>
@@ -2332,6 +2307,27 @@ const TabScontrino = () => {
         {/* ── STATO IDLE ── */}
         {stato === 'idle' && modalita === 'scontrino' && (
           <div className="space-y-4 animate-fade-in-up">
+
+            {/* Banner Guru — accesso revisione volantini */}
+            {isGuru && onApriRevisione && (
+              <button onClick={onApriRevisione}
+                className="w-full rounded-[20px] px-5 py-4 flex items-center gap-4 transition-all active:scale-[0.99]"
+                style={{ background: '#EDE9FE', border: '1.5px solid #7C3AED' }}>
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                  style={{ background: '#7C3AED' }}>
+                  <span style={{ fontSize: '20px' }}>📋</span>
+                </div>
+                <div className="flex-1 text-left">
+                  <p className="text-sm font-semibold" style={{ color: '#4C1D95' }}>
+                    Revisiona volantini della community
+                  </p>
+                  <p className="text-xs mt-0.5" style={{ color: '#6D28D9' }}>
+                    Come Guru puoi approvare o rifiutare le foto inviate dagli utenti
+                  </p>
+                </div>
+                <ChevronRight size={18} strokeWidth={1.5} style={{ color: '#7C3AED', flexShrink: 0 }} />
+              </button>
+            )}
 
             {/* A1: Scontrini in attesa — annullabili */}
             {(loadingInAttesa || scontriniInAttesa.length > 0) && (
@@ -2424,36 +2420,22 @@ const TabScontrino = () => {
 
         {/* ── STATO IDLE VOLANTINO ── */}
         {stato === 'idle' && modalita === 'volantino' && (
-          !isGuru ? (
-            /* Wall — solo livello Guru può caricare volantini */
-            <div className="rounded-[24px] p-7 text-center animate-fade-in-up"
-              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 8px 30px rgba(44,48,38,0.08)' }}>
-              <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4"
-                style={{ background: '#EEF2E4' }}>
-                <span style={{ fontSize: '32px' }}>🌟</span>
-              </div>
-              <h3 className="text-base font-semibold mb-2" style={{ fontFamily: "'Lora', serif", color: T.textPrimary }}>
-                Solo i Guru possono caricare volantini
-              </h3>
-              <p className="text-sm leading-relaxed mb-4" style={{ color: T.textSec }}>
-                Per garantire la qualità dei dati, il caricamento di volantini è riservato agli utenti
-                che hanno raggiunto il livello <strong>Guru (1000 pt)</strong>.
-              </p>
-              <div className="rounded-2xl p-4 mb-4" style={{ background: '#EEF2E4' }}>
-                <p className="text-xs font-medium mb-1" style={{ color: T.primary }}>I tuoi punti attuali</p>
-                <p style={{ fontFamily: "'Lora', serif", fontSize: '28px', fontWeight: 500, color: T.primary }}>
-                  {profilo?.punti || 0} / 1000
+          <div className="animate-fade-in-up space-y-4">
+
+            {/* Banner per non-Guru: spiega il flusso */}
+            {!isGuru && (
+              <div className="rounded-[20px] px-4 py-3"
+                style={{ background: '#EEF2E4', border: `1px solid ${T.border}` }}>
+                <p className="text-sm font-medium mb-1" style={{ color: T.primary }}>
+                  📰 Come funziona
                 </p>
-                <div className="mt-2 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(100,113,68,0.2)' }}>
-                  <div className="h-full rounded-full transition-all"
-                    style={{ width: `${Math.min(100, ((profilo?.punti || 0) / 1000) * 100)}%`, background: T.primary }} />
-                </div>
+                <p className="text-xs leading-relaxed" style={{ color: T.textSec }}>
+                  Le tue foto vengono revisionate da un Guru prima dell'elaborazione automatica.
+                  I punti (+25) ti vengono accreditati dopo l'approvazione.
+                </p>
               </div>
-              <p className="text-xs" style={{ color: T.textSec }}>
-                Carica scontrini per guadagnare punti e sbloccare questa funzione 🧾
-              </p>
-            </div>
-          ) : (
+            )}
+
             <div className="animate-fade-in-up space-y-4">
             {/* Card info */}
             <div className="rounded-[24px] p-6"
@@ -2519,7 +2501,7 @@ const TabScontrino = () => {
               </p>
             </div>
           </div>
-          )
+          </div>
         )}
 
         {/* ── STATO ANTEPRIMA (uguale per entrambe le modalità) ── */}
@@ -2641,7 +2623,7 @@ const TabScontrino = () => {
               </p>
               <p className="text-sm" style={{ color: 'rgba(255,255,255,0.85)' }}>
                 {modalita === 'volantino'
-                  ? 'Revisione in corso — pubblichiamo entro 24h e ti assegniamo i punti.'
+                  ? 'Un Guru esaminerà le foto prima dell\'elaborazione. I punti arrivano dopo l\'approvazione!'
                   : 'Elaboriamo stanotte e ti assegniamo i punti.'
                 }
               </p>
@@ -4014,6 +3996,217 @@ const TabListaSpesa = ({ offerte, archivio = [] }) => {
 };
 
 // ─── Tab Stato ────────────────────────────────────────────────────────────────
+
+// ─── Tab Revisione Volantini — solo Guru ────────────────────────────────────
+const TabRevisioneVolantini = ({ onTorna }) => {
+  const { utente, profilo } = useAuth();
+  const isGuru = (profilo?.punti || 0) >= 1000;
+  const [coda,        setCoda]        = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [elaborando,  setElaborando]  = useState(null);
+  const [motivazione, setMotivazione] = useState('');
+  const [apriRifiuto, setApriRifiuto] = useState(null);
+
+  useEffect(() => {
+    if (!isGuru) return;
+    let mounted = true;
+    setLoading(true);
+    getDocs(query(
+      collection(db, 'coda_volantini'),
+      where('stato', '==', 'in_attesa_revisione'),
+      orderBy('data_caricamento', 'asc'),
+      limit(20)
+    )).then(async snap => {
+      if (!mounted) return;
+      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // Carico fino a 3 anteprime per ogni volantino dalla subcollection pagine
+      const withPrev = await Promise.all(docs.map(async vol => {
+        try {
+          const pSnap = await getDocs(query(
+            collection(db, 'coda_volantini', vol.id, 'pagine'),
+            orderBy('indice', 'asc'), limit(3)
+          ));
+          return { ...vol, anteprime: pSnap.docs.map(p => p.data().immagine_b64).filter(Boolean) };
+        } catch { return { ...vol, anteprime: [] }; }
+      }));
+      if (mounted) { setCoda(withPrev); setLoading(false); }
+    }).catch(() => { if (mounted) setLoading(false); });
+    return () => { mounted = false; };
+  }, [isGuru]);
+
+  const approva = async (docId) => {
+    setElaborando(docId);
+    try {
+      await updateDoc(doc(db, 'coda_volantini', docId), {
+        stato:        'approvato',
+        approvato_da: utente.uid,
+        approvato_il: serverTimestamp(),
+      });
+      setCoda(prev => prev.filter(d => d.id !== docId));
+    } catch (err) { console.error(err); }
+    finally { setElaborando(null); }
+  };
+
+  const rifiuta = async (docId) => {
+    setElaborando(docId);
+    try {
+      await updateDoc(doc(db, 'coda_volantini', docId), {
+        stato:        'rifiutato',
+        rifiutato_da: utente.uid,
+        rifiutato_il: serverTimestamp(),
+        motivazione:  motivazione.trim() || 'Foto non idonea',
+      });
+      setCoda(prev => prev.filter(d => d.id !== docId));
+      setApriRifiuto(null); setMotivazione('');
+    } catch (err) { console.error(err); }
+    finally { setElaborando(null); }
+  };
+
+  if (!isGuru) return (
+    <div className="flex flex-col items-center justify-center h-full px-8 text-center">
+      <span style={{ fontSize: '48px' }}>🌟</span>
+      <p className="text-sm mt-4" style={{ color: T.textSec }}>Solo i Guru possono revisionare i volantini.</p>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col h-full" style={{ background: T.bg }}>
+
+      {/* Header */}
+      <div className="safe-top shrink-0 px-5 pt-5 pb-4 flex items-center gap-3"
+        style={{ background: T.primary }}>
+        {onTorna && (
+          <button onClick={onTorna}
+            className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+            style={{ background: 'rgba(255,255,255,0.15)' }}>
+            <ArrowLeft size={18} strokeWidth={2} style={{ color: '#fff' }} />
+          </button>
+        )}
+        <div className="flex-1">
+          <h1 style={{ fontFamily: "'Lora', serif", fontSize: '20px', fontWeight: 500, color: '#fff' }}>
+            📋 Revisione volantini
+          </h1>
+          <p className="text-xs mt-0.5" style={{ color: 'rgba(255,255,255,0.75)' }}>
+            Approva le foto idonee — rifiuta quelle sfocate o errate
+          </p>
+        </div>
+        <span className="text-sm font-bold shrink-0" style={{ color: 'rgba(255,255,255,0.9)' }}>
+          {coda.length} in coda
+        </span>
+      </div>
+
+      {/* Lista */}
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 py-4 space-y-4">
+
+        {loading && (
+          <div className="flex items-center justify-center py-16">
+            <Loader size={24} strokeWidth={1.5} className="animate-spin" style={{ color: T.primary }} />
+          </div>
+        )}
+
+        {!loading && coda.length === 0 && (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <span style={{ fontSize: '40px' }}>✅</span>
+            <p className="text-sm mt-3" style={{ color: T.textSec }}>Nessun volantino in attesa — ottimo lavoro!</p>
+          </div>
+        )}
+
+        {coda.map(vol => {
+          const dataCaric = vol.data_caricamento?.toDate?.()?.toLocaleDateString('it-IT') || '—';
+          const isElab    = elaborando === vol.id;
+          const isRif     = apriRifiuto === vol.id;
+
+          return (
+            <div key={vol.id} className="rounded-[20px] overflow-hidden"
+              style={{ background: T.surface, border: `1px solid ${T.border}`, boxShadow: '0 2px 12px rgba(44,48,38,0.06)' }}>
+
+              {/* Testata */}
+              <div className="px-4 pt-4 pb-3" style={{ borderBottom: `1px solid ${T.border}` }}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-base font-semibold" style={{ color: T.textPrimary, fontFamily: "'Lora', serif" }}>
+                      {vol.insegna}
+                    </p>
+                    <p className="text-xs mt-0.5" style={{ color: T.textSec }}>
+                      {vol.n_foto} foto · {vol.città || '—'} · {dataCaric}
+                    </p>
+                  </div>
+                  <span className="text-[11px] px-2 py-1 rounded-full font-medium shrink-0"
+                    style={{ background: '#FEF3C7', color: '#92400E' }}>
+                    in attesa
+                  </span>
+                </div>
+              </div>
+
+              {/* Anteprime */}
+              {vol.anteprime?.length > 0 && (
+                <div className="flex gap-2 px-4 py-3 overflow-x-auto hide-scrollbar">
+                  {vol.anteprime.map((b64, i) => (
+                    <img key={i} src={`data:image/jpeg;base64,${b64}`} alt={`p${i+1}`}
+                      className="rounded-xl shrink-0 object-cover"
+                      style={{ width: '100px', height: '130px' }} />
+                  ))}
+                  {vol.n_foto > 3 && (
+                    <div className="w-[100px] h-[130px] rounded-xl shrink-0 flex items-center justify-center"
+                      style={{ background: T.bg, border: `1px solid ${T.border}` }}>
+                      <span className="text-sm" style={{ color: T.textSec }}>+{vol.n_foto - 3} altre</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Input motivazione rifiuto */}
+              {isRif && (
+                <div className="px-4 pb-3">
+                  <label className="block text-[10px] uppercase font-semibold mb-1.5" style={{ color: T.accent }}>
+                    Motivazione rifiuto
+                  </label>
+                  <input type="text" value={motivazione} onChange={e => setMotivazione(e.target.value)}
+                    placeholder="es. Foto sfocata, insegna errata, volantino già presente..."
+                    className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
+                    style={{ background: T.bg, border: `1px solid ${T.accent}`, color: T.textPrimary }} />
+                </div>
+              )}
+
+              {/* Bottoni */}
+              <div className="flex gap-3 px-4 pb-4">
+                {!isRif ? (
+                  <>
+                    <button onClick={() => setApriRifiuto(vol.id)} disabled={isElab}
+                      className="flex-1 py-2.5 rounded-[14px] text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50"
+                      style={{ background: '#FEE2E2', color: '#DC2626' }}>
+                      ✕ Rifiuta
+                    </button>
+                    <button onClick={() => approva(vol.id)} disabled={isElab}
+                      className="flex-1 py-2.5 rounded-[14px] text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
+                      style={{ background: T.primary, color: '#fff' }}>
+                      {isElab ? <><Loader size={14} className="animate-spin" /> Approvo...</> : '✓ Approva'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={() => { setApriRifiuto(null); setMotivazione(''); }}
+                      className="flex-1 py-2.5 rounded-[14px] text-sm font-medium transition-all"
+                      style={{ background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }}>
+                      Annulla
+                    </button>
+                    <button onClick={() => rifiuta(vol.id)} disabled={isElab}
+                      className="flex-1 py-2.5 rounded-[14px] text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
+                      style={{ background: '#DC2626', color: '#fff' }}>
+                      {isElab ? <><Loader size={14} className="animate-spin" /> Rifiuto...</> : '✕ Conferma rifiuto'}
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
+
+        <div className="h-4" />
+      </div>
+    </div>
+  );
+};
 
 const TabStato = ({ statoVolantini }) => (
   <div className="flex flex-col h-full pb-28 overflow-y-auto" style={{ background: T.bg }}>
@@ -6136,7 +6329,7 @@ function AppInterna() {
     try {
       const params = new URLSearchParams(window.location.search);
       const t = params.get('tab');
-      const validi = ['offerte', 'lista', 'scontrino', 'spese', 'profilo'];
+      const validi = ['offerte', 'lista', 'scontrino', 'spese', 'profilo', 'revisione_volantini'];
       if (t && validi.includes(t)) {
         // Rimuove il param senza reload
         const url = new URL(window.location.href);
@@ -6373,7 +6566,21 @@ function AppInterna() {
     );
   }
 
-  const nDaValidare = scontriniDaValidare.length;
+  const nDaValidare  = scontriniDaValidare.length;
+  const isGuruApp    = (profilo?.punti || 0) >= 1000;
+  const [nVolantiniDaRevisare, setNVolantiniDaRevisare] = useState(0);
+
+  useEffect(() => {
+    if (!utente || !isGuruApp) return;
+    let mounted = true;
+    getDocs(query(
+      collection(db, 'coda_volantini'),
+      where('stato', '==', 'in_attesa_revisione'),
+      limit(99)
+    )).then(snap => { if (mounted) setNVolantiniDaRevisare(snap.size); })
+      .catch(() => {});
+    return () => { mounted = false; };
+  }, [utente, isGuruApp, activeTab]);
 
   // Callback quando l'utente convalida o scarta uno scontrino
   const onScontrinoValidato = (docId) => {
@@ -6433,7 +6640,7 @@ function AppInterna() {
         />
       )}
 
-      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}><ErrorBoundary>
+      <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}>
         {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
         {activeTab === 'lista'      && (utente
           ? <TabListaSpesa offerte={offerte} archivio={archivio} />
@@ -6443,8 +6650,11 @@ function AppInterna() {
         {activeTab === 'scontrino'  && (utente
           ? (nDaValidare > 0
             ? <TabValidazioneScontrini scontriniDaValidare={scontriniDaValidare} onValidatoOk={onScontrinoValidato} />
-            : <TabScontrino />)
+            : <TabScontrino onApriRevisione={isGuruApp ? () => setActiveTab('revisione_volantini') : null} />)
           : <TabLoginRichiesto messaggio="Accedi per fotografare scontrini e guadagnare punti." />
+        )}
+        {activeTab === 'revisione_volantini' && utente && isGuruApp && (
+          <TabRevisioneVolantini onTorna={() => setActiveTab('scontrino')} />
         )}
         {activeTab === 'spese'      && (utente
           ? <TabSpese scontriniReali={scontriniUtente} dataLoaded={scontriniLoaded} />
@@ -6454,7 +6664,7 @@ function AppInterna() {
           ? <TabProfilo />
           : <TabLoginRichiesto messaggio="Accedi per vedere il tuo profilo, i tuoi punti e il tuo livello." />
         )}
-      </ErrorBoundary></div>
+      </div>
 
       {/* Banner aggiornamento PWA */}
       {swUpdateAvailable && (
@@ -6527,6 +6737,12 @@ function AppInterna() {
                       <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
                         style={{ background: T.accent, color: '#fff' }}>
                         {nDaValidare > 9 ? '9+' : nDaValidare}
+                      </span>
+                    )}
+                    {nDaValidare === 0 && isGuruApp && nVolantiniDaRevisare > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold"
+                        style={{ background: '#7C3AED', color: '#fff' }}>
+                        {nVolantiniDaRevisare > 9 ? '9+' : nVolantiniDaRevisare}
                       </span>
                     )}
                   </div>
