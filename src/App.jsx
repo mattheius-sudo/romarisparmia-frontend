@@ -1988,6 +1988,209 @@ function scontrinoReducer(state, action) {
   }
 }
 
+// ─── Form inserimento manuale spesa (senza scontrino) ───────────────────────
+// I dati vanno SOLO in spese_personali — non passano per Claude Vision,
+// non contribuiscono a prezzi_scontrini né statistiche_prodotti,
+// non generano punti (non verificabili).
+
+const CATEGORIE_PRODOTTO = [
+  'carne', 'pesce', 'frutta_verdura', 'freschissimi',
+  'dispensa', 'surgelati', 'bevande', 'casa_igiene', 'altro',
+];
+
+const FormInserimentoManuale = ({ utente, profilo, onSuccesso, onErrore }) => {
+  const [insegna,     setInsegna]     = useState('');
+  const [data,        setData]        = useState(new Date().toISOString().slice(0, 10));
+  const [prodotti,    setProdotti]    = useState([{ nome: '', prezzo: '', categoria: 'altro' }]);
+  const [salvando,    setSalvando]    = useState(false);
+
+  const aggiornaProdotto = (idx, campo, val) => {
+    setProdotti(prev => prev.map((p, i) => i === idx ? { ...p, [campo]: val } : p));
+  };
+
+  const aggiungiRiga = () => {
+    setProdotti(prev => [...prev, { nome: '', prezzo: '', categoria: 'altro' }]);
+  };
+
+  const rimuoviRiga = (idx) => {
+    if (prodotti.length === 1) return;
+    setProdotti(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const totale = prodotti.reduce((sum, p) => sum + (parseFloat(p.prezzo) || 0), 0);
+
+  const salva = async () => {
+    if (!insegna.trim()) { onErrore('Inserisci il nome del supermercato.'); return; }
+    if (!data)           { onErrore('Inserisci la data della spesa.'); return; }
+    const prodottiFiltrati = prodotti
+      .filter(p => p.nome.trim())
+      .map(p => ({
+        nome_normalizzato: p.nome.trim(),
+        nome_raw:          p.nome.trim(), // manuale: raw = normalizzato
+        prezzo_unitario:   parseFloat(p.prezzo) || 0,
+        quantita:          1,
+        categoria:         p.categoria || 'altro',
+        tipo_voce:         'specifico',
+      }));
+
+    if (!prodottiFiltrati.length) { onErrore('Inserisci almeno un prodotto.'); return; }
+
+    setSalvando(true);
+    try {
+      await addDoc(collection(db, 'spese_personali', utente.uid, 'scontrini'), {
+        insegna:            insegna.trim(),
+        data_acquisto:      data,
+        totale_scontrino:   totale,
+        prodotti:           prodottiFiltrati,
+        n_prodotti_tot:     prodottiFiltrati.length,
+        n_specifici:        prodottiFiltrati.length,
+        n_aggregati:        0,
+        tipo_scontrino:     'manuale',
+        fonte:              'manuale',        // non propagato alla community
+        data_registrazione: serverTimestamp(),
+        coda_doc_id:        null,
+      });
+      onSuccesso();
+    } catch (err) {
+      console.error(err);
+      onErrore('Errore nel salvataggio. Riprova.');
+    } finally {
+      setSalvando(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 animate-fade-in-up">
+
+      {/* Info banner */}
+      <div className="rounded-[16px] px-4 py-3"
+        style={{ background: '#EEF2E4', border: `1px solid ${T.border}` }}>
+        <p className="text-xs font-medium mb-0.5" style={{ color: T.primary }}>
+          ✏️ Inserimento manuale
+        </p>
+        <p className="text-xs leading-relaxed" style={{ color: T.textSec }}>
+          I dati vengono salvati nel tuo storico personale ma non contribuiscono
+          alle statistiche della community — solo gli scontrini fotografati sono verificabili.
+        </p>
+      </div>
+
+      {/* Intestazione */}
+      <div className="rounded-[20px] p-5"
+        style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+        <p className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: T.textSec }}>
+          Dati spesa
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium mb-1" style={{ color: T.textSec }}>
+              Supermercato <span style={{ color: T.accent }}>*</span>
+            </label>
+            <input
+              type="text"
+              list="insegne-manuali"
+              value={insegna}
+              onChange={e => setInsegna(e.target.value)}
+              placeholder="es. Lidl, Conad, Esselunga..."
+              className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
+              style={{ background: T.bg, border: `1.5px solid ${insegna.trim() ? T.primary : T.border}`, color: T.textPrimary }}
+            />
+            <datalist id="insegne-manuali">
+              {INSEGNE_DISPONIBILI.map(ins => <option key={ins} value={ins} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1" style={{ color: T.textSec }}>
+              Data acquisto <span style={{ color: T.accent }}>*</span>
+            </label>
+            <input
+              type="date"
+              value={data}
+              onChange={e => setData(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl text-base outline-none"
+              style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Lista prodotti */}
+      <div className="rounded-[20px] p-5"
+        style={{ background: T.surface, border: `1px solid ${T.border}` }}>
+        <p className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: T.textSec }}>
+          Prodotti
+        </p>
+        <div className="space-y-2">
+          {prodotti.map((p, idx) => (
+            <div key={idx} className="flex items-center gap-2">
+              {/* Nome prodotto */}
+              <input
+                type="text"
+                value={p.nome}
+                onChange={e => aggiornaProdotto(idx, 'nome', e.target.value)}
+                placeholder="Nome prodotto"
+                className="flex-1 px-3 py-2 rounded-xl text-base outline-none"
+                style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, minWidth: 0 }}
+              />
+              {/* Prezzo */}
+              <input
+                type="number"
+                value={p.prezzo}
+                onChange={e => aggiornaProdotto(idx, 'prezzo', e.target.value)}
+                placeholder="€"
+                step="0.01" min="0"
+                className="px-3 py-2 rounded-xl text-base outline-none text-right"
+                style={{ background: T.bg, border: `1px solid ${T.border}`, color: T.textPrimary, width: '72px' }}
+              />
+              {/* Rimuovi */}
+              <button
+                onClick={() => rimuoviRiga(idx)}
+                disabled={prodotti.length === 1}
+                className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-all"
+                style={{ background: prodotti.length === 1 ? T.bg : '#FEE2E2', color: prodotti.length === 1 ? T.border : '#DC2626' }}>
+                <X size={14} strokeWidth={2} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          onClick={aggiungiRiga}
+          className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all active:scale-[0.99]"
+          style={{ background: T.bg, color: T.primary, border: `1px dashed ${T.primary}` }}>
+          + Aggiungi prodotto
+        </button>
+
+        {/* Totale */}
+        {totale > 0 && (
+          <div className="flex items-center justify-between mt-4 pt-3"
+            style={{ borderTop: `1px solid ${T.border}` }}>
+            <span className="text-xs" style={{ color: T.textSec }}>Totale</span>
+            <span style={{ fontFamily: "'Lora', serif", fontSize: '18px', fontWeight: 600, color: T.textPrimary }}>
+              {formattaPrezzo(totale)}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Bottone salva */}
+      <button
+        onClick={salva}
+        disabled={salvando}
+        className="w-full py-4 rounded-[18px] text-sm font-semibold transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+        style={{ background: T.primary, color: '#fff', boxShadow: '0 4px 16px rgba(100,113,68,0.3)' }}>
+        {salvando
+          ? <><Loader size={16} className="animate-spin" /> Salvo...</>
+          : <>✓ Salva spesa</>}
+      </button>
+
+      <p className="text-[10px] text-center" style={{ color: T.textSec }}>
+        Non genera punti — solo gli scontrini fotografati sono verificabili
+      </p>
+
+    </div>
+  );
+};
+
 const TabScontrino = ({ onApriRevisione = null }) => {
   const { utente, profilo } = useAuth();
   const isGuru = (profilo?.punti || 0) >= 1000;
@@ -2274,6 +2477,7 @@ const TabScontrino = ({ onApriRevisione = null }) => {
           {[
             { id: 'scontrino', label: '🧾 Scontrino' },
             { id: 'volantino', label: '📰 Volantino' },
+            { id: 'manuale',   label: '✏️ Manuale' },
           ].map(m => (
             <button
               key={m.id}
@@ -2490,7 +2694,21 @@ const TabScontrino = ({ onApriRevisione = null }) => {
 
         {/* ── STATO ANTEPRIMA
 
-        {/* ── STATO ANTEPRIMA (uguale per entrambe le modalità) ── */}
+        {/* ── STATO IDLE MANUALE ── */}
+        {stato === 'idle' && modalita === 'manuale' && (
+          <FormInserimentoManuale
+            utente={utente}
+            profilo={profilo}
+            onSuccesso={() => {
+              setStato('successo');
+              setMessaggio('Spesa salvata nel tuo storico personale.');
+              setTimeout(() => setStato('idle'), 4000);
+            }}
+            onErrore={(msg) => { setStato('errore'); setMessaggio(msg); }}
+          />
+        )}
+
+        {/* ── STATO ANTEPRIMA (uguale per scontrino e volantino) ── */}
         {stato === 'anteprima' && (
           <div className="animate-fade-in-up space-y-4">
 
@@ -2855,7 +3073,7 @@ const CATEGORIE_EMOJI = {
   altro:          '📦',
 };
 
-const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
+const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null, preferenze = null }) => {
   const { prodottiPreferiti, isLoggedIn } = useAuth();
   const [searchOpen,     setSearchOpen]     = useState(false);
   const [searchQuery,    setSearchQuery]     = useState('');
@@ -2866,17 +3084,30 @@ const TabOfferte = ({ offerte, archivio = [], cittàAttiva = null }) => {
   const { segnalati, segnala } = useSegnalazioniStore();
   const searchRef = React.useRef(null);
 
-  // ── Deduplicazione + filtro città ─────────────────────────────────────────
+  // ── Deduplicazione + filtro città + filtro insegne attive ────────────────
   const offerteDedup = useMemo(() => {
+    // Insegne selezionate dall'utente — se non loggato mostra tutto
+    const insegneAttive = preferenze?.insegne_attive?.length
+      ? new Set(preferenze.insegne_attive)
+      : null; // null = nessun filtro
+
     const seen = new Map();
     offerte.forEach(o => {
       if (o.nascosto) return;
-      if (cittàAttiva && o.città && o.città !== cittàAttiva) return;
+      // Filtro città: esclude offerte di altre città
+      // Se o.città è null (offerta senza campo città) escludiamo per sicurezza
+      // quando l'utente ha una città attiva
+      if (cittàAttiva) {
+        if (!o.città || o.città !== cittàAttiva) return;
+      }
+      // Filtro insegne: esclude insegne che l'utente ha deselezionato
+      if (insegneAttive && o.insegna && !insegneAttive.has(o.insegna)) return;
+
       const key = `${(o.nome||'').toLowerCase()}_${(o.marca||'').toLowerCase()}_${o.insegna}_${o.grammatura||''}`;
       if (!seen.has(key) || seen.get(key).prezzo > o.prezzo) seen.set(key, o);
     });
     return [...seen.values()].filter(o => !o.valido_fino || o.valido_fino >= OGGI);
-  }, [offerte, cittàAttiva]);
+  }, [offerte, cittàAttiva, preferenze]);
 
   // ── Insegne disponibili ────────────────────────────────────────────────────
   const insegneDisp = useMemo(() =>
@@ -6475,9 +6706,13 @@ function AppInterna() {
     const fetchData = async () => {
       const oggi = new Date().toISOString().split('T')[0];
 
+      // Chiave cache include la città — utenti di città diverse non condividono la cache
+      const cacheKey       = `lenticchia_cache_offerte_${cittàAttiva || 'global'}`;
+      const cacheKeyStato  = `lenticchia_cache_stato_${cittàAttiva || 'global'}`;
+
       // ── 1. Prova cache locale prima di toccare Firestore ──────────────────
-      const cacheOfferte = leggiCache('lenticchia_cache_offerte');
-      const cachStato    = leggiCache('lenticchia_cache_stato');
+      const cacheOfferte = leggiCache(cacheKey);
+      const cachStato    = leggiCache(cacheKeyStato);
 
       if (cacheOfferte && cachStato) {
         // Cache valida — zero letture Firestore
@@ -6494,8 +6729,17 @@ function AppInterna() {
 
       // ── 2. Cache mancante o scaduta — legge da Firestore ─────────────────
       try {
+        // Filtra per città se disponibile — così un utente mantovano non vede
+        // offerte romane e viceversa
+        const offerteQuery = cittàAttiva
+          ? query(
+              collection(db, 'offerte_attive'),
+              where('città', '==', cittàAttiva)
+            )
+          : collection(db, 'offerte_attive');
+
         const [offerteSnapshot, statoSnapshot] = await Promise.all([
-          getDocs(collection(db, 'offerte_attive')),
+          getDocs(offerteQuery),
           getDocs(collection(db, 'stato_volantini')),
         ]);
 
@@ -6511,10 +6755,9 @@ function AppInterna() {
         } else {
           setOfferte(offerteList);
           setStatoVolantini(statoList);
-          // Salva entrambi in cache per le prossime 6 ore
-          // stato_volantini è piccolo (9 doc) ma evita letture inutili ad ogni apertura
-          scriviCache('lenticchia_cache_offerte', offerteList);
-          scriviCache('lenticchia_cache_stato', statoList);
+          // Salva in cache con chiave per città
+          scriviCache(cacheKey, offerteList);
+          scriviCache(cacheKeyStato, statoList);
         }
 
         // ── 3. Archivio NON caricato al boot ─────────────────────────────
@@ -6530,7 +6773,7 @@ function AppInterna() {
       }
     };
     fetchData();
-  }, []);
+  }, [cittàAttiva]); // ricarica quando cambia città
 
   // Fetch contatore volantini da revisionare — solo per i Guru
   // DEVE stare prima di TUTTI i return condizionali (Rules of Hooks)
@@ -6677,7 +6920,7 @@ function AppInterna() {
       )}
 
       <div className="h-screen overflow-hidden" style={{ paddingBottom: 'calc(env(safe-area-inset-bottom) + 4.5rem)' }}>
-        {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} />}
+        {activeTab === 'offerte'    && <TabOfferte offerte={offerte} archivio={archivio} cittàAttiva={cittàAttiva} preferenze={preferenze} />}
         {activeTab === 'lista'      && (utente
           ? <TabListaSpesa offerte={offerte} archivio={archivio} />
           : <TabLoginRichiesto messaggio="Accedi per gestire la tua lista della spesa e usare il Verdetto Spesa." />
