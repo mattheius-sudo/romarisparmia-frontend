@@ -1135,19 +1135,67 @@ const SchermataLogin = () => {
 // ─── Sezione: I Miei Supermercati ─────────────────────────────────────────────
 
 const SezioneSupermercati = () => {
-  const { preferenze, toggleInsegna, aggiornaPreferenze, aggiornaTessera, cambiaArea } = useAuth();
+  const { preferenze, aggiornaPreferenze, aggiornaTessera } = useAuth();
   const [tesseraAperta, setTesseraAperta]   = useState(null);
   const [numeroInput,   setNumeroInput]      = useState('');
-  const [cambioArea,    setCambioArea]       = useState(false); // mostra selezione area
+  const [cambioArea,    setCambioArea]       = useState(false);
+  const [salvando,      setSalvando]         = useState(false);
+  const [salvato,       setSalvato]          = useState(false);
 
-  const areaAttiva     = preferenze?.area_selezionata || null;
-  const insegneAttive  = new Set(preferenze?.insegne_attive || []);
-  const tessere        = preferenze?.tessere || {};
+  // ── Stato locale — l'utente modifica qui, poi preme Salva ─────────────────
+  const [areaLocale,     setAreaLocale]     = useState(() => preferenze?.area_selezionata || null);
+  const [insegneLocali,  setInsegneLocali]  = useState(() => new Set(preferenze?.insegne_attive || []));
 
-  // Insegne disponibili nell'area selezionata (o tutte se nessuna area)
-  const insegneDellArea = areaAttiva
-    ? (INSEGNE_PER_AREA[areaAttiva] || [])
+  // Sincronizza lo stato locale se le preferenze cambiano dall'esterno
+  // (es. primo caricamento da Firestore)
+  const prefKey = JSON.stringify(preferenze?.insegne_attive);
+  React.useEffect(() => {
+    setAreaLocale(preferenze?.area_selezionata || null);
+    setInsegneLocali(new Set(preferenze?.insegne_attive || []));
+  }, [preferenze?.area_selezionata, prefKey]);
+
+  const tessere         = preferenze?.tessere || {};
+  const insegneDellArea = areaLocale
+    ? (INSEGNE_PER_AREA[areaLocale] || [])
     : INSEGNE_DISPONIBILI;
+
+  // Controlla se ci sono modifiche non salvate
+  const hasDirty = areaLocale !== (preferenze?.area_selezionata || null)
+    || JSON.stringify([...insegneLocali].sort()) !== JSON.stringify([...(preferenze?.insegne_attive || [])].sort());
+
+  const toggleInsegnaLocale = (insegna) => {
+    setInsegneLocali(prev => {
+      const next = new Set(prev);
+      next.has(insegna) ? next.delete(insegna) : next.add(insegna);
+      return next;
+    });
+  };
+
+  const scegliArea = (id) => {
+    setAreaLocale(id);
+    // Pre-seleziona tutte le insegne della nuova area
+    setInsegneLocali(new Set(INSEGNE_PER_AREA[id] || []));
+    setCambioArea(false);
+  };
+
+  const salvaPreferenze = async () => {
+    setSalvando(true);
+    try {
+      await aggiornaPreferenze({
+        ...preferenze,
+        area_selezionata:        areaLocale,
+        insegne_attive:          [...insegneLocali],
+        punti_vendita_attivi:    preferenze?.punti_vendita_attivi || [],
+        onboarding_supermercati: true,
+      });
+      setSalvato(true);
+      setTimeout(() => setSalvato(false), 2500);
+    } catch (err) {
+      console.error('Errore salvataggio preferenze:', err);
+    } finally {
+      setSalvando(false);
+    }
+  };
 
   const apriTessera = (insegna) => {
     setTesseraAperta(insegna);
@@ -1159,16 +1207,10 @@ const SezioneSupermercati = () => {
     setTesseraAperta(null);
   };
 
-  // Seleziona una nuova area — aggiorna area + pre-seleziona tutte le insegne
-  const confermaArea = async (nuovaArea) => {
-    await cambiaArea(nuovaArea);
-    setCambioArea(false);
-  };
-
   return (
     <div className="space-y-3">
 
-      {/* Card area selezionata */}
+      {/* ── Card area geografica ─────────────────────────────────────────── */}
       <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
         <div className="flex items-center justify-between mb-1">
           <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: T.textSec }}>
@@ -1177,8 +1219,7 @@ const SezioneSupermercati = () => {
           <button
             onClick={() => setCambioArea(!cambioArea)}
             className="text-xs font-medium px-2.5 py-1 rounded-lg transition-all"
-            style={{ background: T.bg, color: T.primary, border: `1px solid ${T.border}` }}
-          >
+            style={{ background: T.bg, color: T.primary, border: `1px solid ${T.border}` }}>
             {cambioArea ? 'Annulla' : 'Cambia'}
           </button>
         </div>
@@ -1186,32 +1227,30 @@ const SezioneSupermercati = () => {
         {!cambioArea ? (
           <div className="flex items-center gap-3 mt-2">
             <span style={{ fontSize: '24px' }}>
-              {AREE_DISPONIBILI.find(a => a.id === areaAttiva)?.emoji || '📍'}
+              {AREE_DISPONIBILI.find(a => a.id === areaLocale)?.emoji || '📍'}
             </span>
             <div>
               <p className="font-semibold" style={{ color: T.textPrimary }}>
-                {areaAttiva
-                  ? AREE_DISPONIBILI.find(a => a.id === areaAttiva)?.label || areaAttiva
+                {areaLocale
+                  ? AREE_DISPONIBILI.find(a => a.id === areaLocale)?.label || areaLocale
                   : 'Nessuna area selezionata'}
               </p>
               <p className="text-xs" style={{ color: T.textSec }}>
-                {insegneDellArea.length} supermercati disponibili in quest'area
+                {insegneDellArea.length} supermercati disponibili
               </p>
             </div>
           </div>
         ) : (
-          // Selezione area inline
           <div className="mt-3 space-y-2">
             {AREE_DISPONIBILI.map(({ id, label, emoji }) => (
               <button
                 key={id}
-                onClick={() => confermaArea(id)}
+                onClick={() => scegliArea(id)}
                 className="w-full flex items-center gap-3 p-3 rounded-[14px] text-left transition-all active:scale-[0.99]"
                 style={{
-                  background: id === areaAttiva ? '#EEF2E4' : T.bg,
-                  border: `1.5px solid ${id === areaAttiva ? T.primary : T.border}`,
-                }}
-              >
+                  background: id === areaLocale ? '#EEF2E4' : T.bg,
+                  border: `1.5px solid ${id === areaLocale ? T.primary : T.border}`,
+                }}>
                 <span style={{ fontSize: '22px' }}>{emoji}</span>
                 <div className="flex-1">
                   <p className="text-sm font-medium" style={{ color: T.textPrimary }}>{label}</p>
@@ -1220,36 +1259,33 @@ const SezioneSupermercati = () => {
                     {(INSEGNE_PER_AREA[id] || []).length > 4 ? '...' : ''}
                   </p>
                 </div>
-                {id === areaAttiva && <span style={{ color: T.primary, fontSize: '14px' }}>✓</span>}
+                {id === areaLocale && <span style={{ color: T.primary, fontSize: '14px' }}>✓</span>}
               </button>
             ))}
           </div>
         )}
       </div>
 
-      {/* Card insegne attive */}
+      {/* ── Card insegne ─────────────────────────────────────────────────── */}
       <div className="rounded-[20px] p-5" style={{ background: T.surface, border: `1px solid ${T.border}` }}>
         <h3 className="text-xs font-medium uppercase tracking-wider mb-1" style={{ color: T.textSec }}>
           I miei supermercati
         </h3>
         <p className="text-xs mb-4" style={{ color: T.textSec }}>
           Il Verdetto Spesa considera solo i supermercati attivi.
-          {areaAttiva && ` Mostrando l'area ${areaAttiva}.`}
         </p>
 
         <div className="space-y-2">
           {insegneDellArea.map(insegna => {
-            const attiva  = insegneAttive.has(insegna);
+            const attiva  = insegneLocali.has(insegna);
             const tessera = tessere[insegna];
             const hasTessera = tessera?.attiva;
             return (
               <div key={insegna}>
                 <div className="flex items-center gap-3 py-2">
-                  {/* Toggle attiva/disattiva */}
                   <button
-                    onClick={() => toggleInsegna(insegna)}
-                    className="flex items-center gap-2 flex-1 active:scale-[0.99] transition-all"
-                  >
+                    onClick={() => toggleInsegnaLocale(insegna)}
+                    className="flex items-center gap-2 flex-1 active:scale-[0.99] transition-all">
                     <div className="w-11 h-6 rounded-full relative transition-colors flex-shrink-0"
                       style={{ background: attiva ? T.primary : T.border }}>
                       <div className="w-5 h-5 rounded-full absolute top-0.5 transition-all"
@@ -1259,7 +1295,6 @@ const SezioneSupermercati = () => {
                       {insegna}
                     </span>
                   </button>
-                  {/* Badge tessera */}
                   {attiva && (
                     <button
                       onClick={() => apriTessera(insegna)}
@@ -1267,14 +1302,12 @@ const SezioneSupermercati = () => {
                       style={hasTessera
                         ? { background: '#EEF2E4', color: T.primary, border: '1px solid #C8D5A8' }
                         : { background: T.bg, color: T.textSec, border: `1px solid ${T.border}` }
-                      }
-                    >
+                      }>
                       {hasTessera ? '🪪 ' + (tessera.numero ? tessera.numero.slice(0,6) + '…' : 'Sì') : '+ Tessera'}
                     </button>
                   )}
                 </div>
 
-                {/* Pannello tessera */}
                 {tesseraAperta === insegna && (
                   <div className="mt-1 mb-2 p-3 rounded-2xl" style={{ background: T.bg, border: `1px solid ${T.border}` }}>
                     <p className="text-xs mb-2" style={{ color: T.textSec }}>Numero carta fedeltà</p>
@@ -1312,6 +1345,26 @@ const SezioneSupermercati = () => {
           })}
         </div>
       </div>
+
+      {/* ── Bottone Salva ─────────────────────────────────────────────────── */}
+      <button
+        onClick={salvaPreferenze}
+        disabled={salvando || salvato}
+        className="w-full py-4 rounded-[20px] text-sm font-semibold transition-all active:scale-[0.98] disabled:opacity-70 flex items-center justify-center gap-2"
+        style={{
+          background: salvato ? '#22C55E' : hasDirty ? T.primary : T.border,
+          color: hasDirty || salvato ? '#fff' : T.textSec,
+          boxShadow: hasDirty && !salvato ? '0 4px 16px rgba(100,113,68,0.3)' : 'none',
+        }}>
+        {salvando ? (
+          <><Loader size={16} className="animate-spin" /> Salvo...</>
+        ) : salvato ? (
+          <>✓ Salvato!</>
+        ) : (
+          hasDirty ? 'Salva preferenze' : 'Nessuna modifica'
+        )}
+      </button>
+
     </div>
   );
 };
